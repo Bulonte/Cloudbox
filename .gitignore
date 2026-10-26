@@ -1,0 +1,83 @@
+# ===== CloudBox 代码仓 .gitignore（仓库根 = cloudbox/） =====
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.swp
+*.swo
+*~
+
+# ---------- 环境变量与密钥（绝对禁止提交） ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+secrets.yaml
+credentials/
+
+# ---------- Go 后端 ----------
+backend/bin/
+backend/server
+backend/*.exe
+backend/coverage.out
+backend/coverage.html
+backend/vendor/
+backend/tmp/
+
+# ---------- 前端 ----------
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/.nuxt/
+frontend/*.local
+frontend/stats.html
+
+# ---------- 日志与临时文件 ----------
+logs/
+*.log
+*.log.*
+tmp/
+temp/
+.cache/
+*.tmp
+*.swp
+
+# ---------- 数据库与存储数据 ----------
+docker/mysql/data/
+docker/redis/data/
+data/
+storage/
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+dump.sql
+*.sql.gz
+
+# ---------- 测试与评测产物 ----------
+backend/testdata/generated/
+reports/
+coverage/
+
+# ---------- 归档 ----------
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+backup/

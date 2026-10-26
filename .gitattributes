@@ -1,0 +1,59 @@
+# CloudBox Git 属性配置
+# 作用：统一换行符、标记二进制文件、解决 LF/CRLF 差异
+
+# ---------- 默认：入库统一 LF，检出按平台自动转换 ----------
+* text=auto eol=lf
+
+# ---------- 明确指定换行符 ----------
+*.go       text eol=lf
+*.ts       text eol=lf
+*.vue      text eol=lf
+*.js       text eol=lf
+*.json     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.sh       text eol=lf
+*.sql      text eol=lf
+*.css      text eol=lf
+*.html     text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
+*.env      text eol=lf
+Dockerfile text eol=lf
+Makefile  text eol=lf
+
+# ---------- Windows 批处理脚本保留 CRLF ----------
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# ---------- 二进制文件，禁止行尾转换与文本 diff ----------
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.bmp   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.rar   binary
+*.7z    binary
+*.gz    binary
+*.tar   binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+*.mp4   binary
+*.mp3   binary
+*.wav   binary
+
+# ---------- 语言统计 ----------
+*.go     linguist-language=Go
+*.ts     linguist-language=TypeScript
+*.vue    linguist-language=Vue
+*.sql    linguist-language=SQL

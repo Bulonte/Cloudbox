@@ -1,0 +1,31 @@
+root = true
+
+# ---------- 默认：源码 UTF-8 无 BOM、LF 换行 ----------
+# 注意：Go 编译与前端构建对 BOM 敏感，源码一律不加 BOM；
+#       仅 Markdown 文档在 Windows 下加 BOM 以防中文乱码。
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# ---------- 文档：UTF-8 BOM + CRLF（Windows 下防乱码） ----------
+[*.md]
+charset = utf-8-bom
+end_of_line = crlf
+
+# ---------- 源码：显式 UTF-8 无 BOM + LF ----------
+[*.{go,ts,tsx,js,jsx,vue,json,yaml,yml,sql,css,scss,less,html,sh,py}]
+charset = utf-8
+end_of_line = lf
+
+# ---------- Windows 脚本保留 CRLF ----------
+[*.{bat,cmd,ps1}]
+charset = utf-8-bom
+end_of_line = crlf
+
+# ---------- 特殊文件不处理空白 ----------
+[*.{md,sql}]
+trim_trailing_whitespace = false

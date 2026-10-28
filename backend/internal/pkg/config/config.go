@@ -19,8 +19,10 @@ type Config struct {
 		DB       int    `mapstructure:"db"`
 	} `mapstructure:"redis"`
 	JWT struct {
-		Secret      string `mapstructure:"secret"`
-		ExpireHours int    `mapstructure:"expire_hours"`
+		Secret             string `mapstructure:"secret"`
+		AccessExpireHours  int    `mapstructure:"access_expire_hours"`
+		RefreshExpireHours int    `mapstructure:"refresh_expire_hours"`
+		Issuer             string `mapstructure:"issuer"`
 	} `mapstructure:"jwt"`
 	Storage struct {
 		Driver   string `mapstructure:"driver"`
@@ -40,8 +42,10 @@ func Load() (*Config, error) {
 	v.SetDefault("mysql.dsn", "cloudbox:cloudbox123456@tcp(127.0.0.1:3307)/cloudbox?charset=utf8mb4&parseTime=True&loc=Local")
 	v.SetDefault("redis.addr", "127.0.0.1:6380")
 	v.SetDefault("redis.db", 0)
-	v.SetDefault("jwt.secret", "change-me-to-a-random-string")
-	v.SetDefault("jwt.expire_hours", 72)
+	v.SetDefault("jwt.secret", "dev-only-please-override-32bytes-minimum!!")
+	v.SetDefault("jwt.access_expire_hours", 2)
+	v.SetDefault("jwt.refresh_expire_hours", 168)
+	v.SetDefault("jwt.issuer", "cloudbox")
 	v.SetDefault("storage.driver", "local")
 	v.SetDefault("storage.local_dir", "./storage/uploads")
 
@@ -53,7 +57,9 @@ func Load() (*Config, error) {
 	_ = v.BindEnv("redis.password", "REDIS_PASSWORD")
 	_ = v.BindEnv("redis.db", "REDIS_DB")
 	_ = v.BindEnv("jwt.secret", "JWT_SECRET")
-	_ = v.BindEnv("jwt.expire_hours", "JWT_EXPIRE_HOURS")
+	_ = v.BindEnv("jwt.access_expire_hours", "JWT_ACCESS_EXPIRE_HOURS")
+	_ = v.BindEnv("jwt.refresh_expire_hours", "JWT_REFRESH_EXPIRE_HOURS")
+	_ = v.BindEnv("jwt.issuer", "JWT_ISSUER")
 	_ = v.BindEnv("storage.driver", "STORAGE_DRIVER")
 	_ = v.BindEnv("storage.local_dir", "STORAGE_LOCAL_DIR")
 

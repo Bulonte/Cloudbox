@@ -13,9 +13,11 @@ redis:
   db: 0
 
 jwt:
-  # 仅本地开发默认值，生产必须用 JWT_SECRET 环境变量覆盖
-  secret: "change-me-to-a-random-string"
-  expire_hours: 72
+  # 仅本地开发默认值，生产必须用 JWT_SECRET 环境变量覆盖（≥32 字节）
+  secret: "dev-only-please-override-32bytes-minimum!!"
+  access_expire_hours: 2
+  refresh_expire_hours: 168
+  issuer: "cloudbox"
 
 storage:
   driver: local

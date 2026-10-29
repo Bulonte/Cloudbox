@@ -76,6 +76,12 @@ func TestAuthRequiredTable(t *testing.T) {
 	other, _ := jwt.NewManager("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "cloudbox", 2*time.Hour, 168*time.Hour)
 	wrongSigned, _, _ := other.GenerateAccess(7, "user")
 
+	// refresh 只能换 token，不能当访问凭证：中间件必须 401
+	refreshTok, _, err := mgr.GenerateRefresh(7)
+	if err != nil {
+		t.Fatalf("签发 refresh 失败: %v", err)
+	}
+
 	cases := []struct {
 		name       string
 		header     string // ""=不带头；"raw:"前缀=原样 Authorization
@@ -88,6 +94,7 @@ func TestAuthRequiredTable(t *testing.T) {
 		{"错scheme401", "raw:Token " + valid, &fakeChecker{}, 401, 20001},
 		{"篡改401", "Bearer " + tampered, &fakeChecker{}, 401, 20002},
 		{"错密钥401", "Bearer " + wrongSigned, &fakeChecker{}, 401, 20002},
+		{"refresh冒充401", "Bearer " + refreshTok, &fakeChecker{}, 401, 20002},
 		{"已吊销401", "Bearer " + valid, &fakeChecker{revoked: map[string]bool{}}, 401, 20002}, // jti 稍后填
 		{"Redis挂500", "Bearer " + valid, &errChecker{}, 500, 90001},
 	}

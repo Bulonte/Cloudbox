@@ -55,7 +55,7 @@ func AuthRequired(mgr *jwt.Manager, checker RevokedChecker) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		claims, err := mgr.Parse(parts[1])
+		claims, err := mgr.ParseAccess(parts[1])
 		if err != nil {
 			response.Fail(c, http.StatusUnauthorized, 20002, "登录已过期")
 			c.Abort()

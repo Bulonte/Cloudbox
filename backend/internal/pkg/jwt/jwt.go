@@ -13,12 +13,19 @@ import (
 // 吊销 key 约定：jwt:access:<jti>，value 任意，存在即已吊销/登出
 const RevokedKeyPrefix = "jwt:access:"
 
+// Token 类型：access 才能过 AuthRequired；refresh 只能换 token，不能当访问凭证
+const (
+	TokenTypeAccess  = "access"
+	TokenTypeRefresh = "refresh"
+)
+
 // Claims CloudBox JWT claims
-// Access 携带 UserID+Role+JTI；Refresh 仅 UserID+JTI（Role 为空）
+// Access 携带 UserID+Role+JTI+typ=access；Refresh 仅 UserID+JTI+typ=refresh（Role 为空）
 type Claims struct {
-	UserID uint64 `json:"uid"`
-	Role   string `json:"role,omitempty"`
-	JTI    string `json:"jti"`
+	UserID    uint64 `json:"uid"`
+	Role      string `json:"role,omitempty"`
+	JTI       string `json:"jti"`
+	TokenType string `json:"typ"`
 	gjwt.RegisteredClaims
 }
 
@@ -61,9 +68,10 @@ func (m *Manager) GenerateAccess(userID uint64, role string) (token, jti string,
 	}
 	now := nowUTC()
 	c := Claims{
-		UserID: userID,
-		Role:   role,
-		JTI:    jti,
+		UserID:    userID,
+		Role:      role,
+		JTI:       jti,
+		TokenType: TokenTypeAccess,
 		RegisteredClaims: gjwt.RegisteredClaims{
 			ExpiresAt: gjwt.NewNumericDate(now.Add(m.accessTTL)),
 			IssuedAt:  gjwt.NewNumericDate(now),
@@ -87,8 +95,9 @@ func (m *Manager) GenerateRefresh(userID uint64) (token, jti string, err error) 
 	}
 	now := nowUTC()
 	c := Claims{
-		UserID: userID,
-		JTI:    jti,
+		UserID:    userID,
+		JTI:       jti,
+		TokenType: TokenTypeRefresh,
 		RegisteredClaims: gjwt.RegisteredClaims{
 			ExpiresAt: gjwt.NewNumericDate(now.Add(m.refreshTTL)),
 			IssuedAt:  gjwt.NewNumericDate(now),
@@ -105,6 +114,7 @@ func (m *Manager) GenerateRefresh(userID uint64) (token, jti string, err error) 
 }
 
 // Parse 解析并校验：算法必须 HS256，exp/iat/nbf/iss 全检；不碰 Redis
+// 注意：Parse 不鉴别 typ，仅做签名与有效期校验；鉴权请用 ParseAccess
 func (m *Manager) Parse(tokenString string) (*Claims, error) {
 	c := &Claims{}
 	t, err := gjwt.ParseWithClaims(tokenString, c, func(t *gjwt.Token) (any, error) {
@@ -118,6 +128,19 @@ func (m *Manager) Parse(tokenString string) (*Claims, error) {
 	}
 	if !t.Valid {
 		return nil, errors.New("token 无效")
+	}
+	return c, nil
+}
+
+// ParseAccess 解析访问 token：Parse 基础上强制 typ=access
+// refresh（typ=refresh）或缺 typ 的历史 token 一律拒绝，避免 7 天 refresh 冒充 2 小时 access
+func (m *Manager) ParseAccess(tokenString string) (*Claims, error) {
+	c, err := m.Parse(tokenString)
+	if err != nil {
+		return nil, err
+	}
+	if c.TokenType != TokenTypeAccess {
+		return nil, errors.New("非访问 token")
 	}
 	return c, nil
 }

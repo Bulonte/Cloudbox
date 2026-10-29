@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+
 	"github.com/spf13/viper"
 )
 
@@ -30,7 +32,11 @@ type Config struct {
 	} `mapstructure:"storage"`
 }
 
+// devJWTSecret 仅本地开发默认值；prod 用它直接报错，逼配真密钥
+const devJWTSecret = "dev-only-please-override-32bytes-minimum!!"
+
 // Load 加载配置：configs/config.yaml 默认值 < 环境变量覆盖
+// JWT 密钥：CLOUDBOX_JWT_SECRET 主用，JWT_SECRET 兼容；prod 不配真密钥直接报错，杜绝默认密钥上线
 func Load() (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile("configs/config.yaml")
@@ -42,7 +48,7 @@ func Load() (*Config, error) {
 	v.SetDefault("mysql.dsn", "cloudbox:cloudbox123456@tcp(127.0.0.1:3307)/cloudbox?charset=utf8mb4&parseTime=True&loc=Local")
 	v.SetDefault("redis.addr", "127.0.0.1:6380")
 	v.SetDefault("redis.db", 0)
-	v.SetDefault("jwt.secret", "dev-only-please-override-32bytes-minimum!!")
+	v.SetDefault("jwt.secret", devJWTSecret)
 	v.SetDefault("jwt.access_expire_hours", 2)
 	v.SetDefault("jwt.refresh_expire_hours", 168)
 	v.SetDefault("jwt.issuer", "cloudbox")
@@ -56,7 +62,8 @@ func Load() (*Config, error) {
 	_ = v.BindEnv("redis.addr", "REDIS_ADDR")
 	_ = v.BindEnv("redis.password", "REDIS_PASSWORD")
 	_ = v.BindEnv("redis.db", "REDIS_DB")
-	_ = v.BindEnv("jwt.secret", "JWT_SECRET")
+	// JWT_SECRET 仅兼容历史用法；规范主变量是 CLOUDBOX_JWT_SECRET，优先级更高
+	_ = v.BindEnv("jwt.secret", "CLOUDBOX_JWT_SECRET", "JWT_SECRET")
 	_ = v.BindEnv("jwt.access_expire_hours", "JWT_ACCESS_EXPIRE_HOURS")
 	_ = v.BindEnv("jwt.refresh_expire_hours", "JWT_REFRESH_EXPIRE_HOURS")
 	_ = v.BindEnv("jwt.issuer", "JWT_ISSUER")
@@ -66,6 +73,10 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
+	}
+	// prod 安全兜底：仍用开发默认密钥（或空/过短密钥）直接拒绝启动，杜绝默认密钥上线
+	if cfg.App.Env == "prod" && (cfg.JWT.Secret == devJWTSecret || len(cfg.JWT.Secret) < 32) {
+		return nil, errors.New("prod 环境必须配置 CLOUDBOX_JWT_SECRET（≥32 字节，禁止使用开发默认密钥）")
 	}
 	return &cfg, nil
 }

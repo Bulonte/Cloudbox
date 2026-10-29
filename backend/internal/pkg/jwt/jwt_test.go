@@ -36,12 +36,15 @@ func TestGenerateParseAccess(t *testing.T) {
 	if jti == "" {
 		t.Fatalf("jti 为空")
 	}
-	c, err := m.Parse(token)
+	c, err := m.ParseAccess(token)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
 	if c.UserID != 1001 || c.Role != "user" || c.JTI != jti {
 		t.Fatalf("claims 不对: %+v", c)
+	}
+	if c.TokenType != jwt.TokenTypeAccess {
+		t.Fatalf("TokenType = %q, 期望 access", c.TokenType)
 	}
 	if c.Issuer != "cloudbox" {
 		t.Fatalf("Issuer = %q, 期望 cloudbox", c.Issuer)
@@ -63,6 +66,13 @@ func TestGenerateRefreshHasNoRole(t *testing.T) {
 	}
 	if c.Role != "" {
 		t.Fatalf("refresh 不应带 role, 得到 %q", c.Role)
+	}
+	if c.TokenType != jwt.TokenTypeRefresh {
+		t.Fatalf("TokenType = %q, 期望 refresh", c.TokenType)
+	}
+	// refresh 不能冒充 access：ParseAccess 必须拒绝
+	if _, err := m.ParseAccess(token); err == nil {
+		t.Fatalf("refresh 当 access 用必须被拒绝")
 	}
 }
 

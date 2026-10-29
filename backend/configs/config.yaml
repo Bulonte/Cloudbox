@@ -1,0 +1,24 @@
+# CloudBox 后端默认配置（可提交；敏感值用环境变量/.env 覆盖）
+app:
+  port: 8080
+  env: dev
+
+mysql:
+  # 与 .env.example 对齐：宿主直连 127.0.0.1:3307
+  dsn: "cloudbox:cloudbox123456@tcp(127.0.0.1:3307)/cloudbox?charset=utf8mb4&parseTime=True&loc=Local"
+
+redis:
+  addr: "127.0.0.1:6380"
+  password: ""
+  db: 0
+
+jwt:
+  # 仅本地开发默认值；主变量 CLOUDBOX_JWT_SECRET（兼容 JWT_SECRET），prod 用默认值直接拒绝启动
+  secret: "dev-only-please-override-32bytes-minimum!!"
+  access_expire_hours: 2
+  refresh_expire_hours: 168
+  issuer: "cloudbox"
+
+storage:
+  driver: local
+  local_dir: "./storage/uploads"

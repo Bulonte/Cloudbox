@@ -32,3 +32,11 @@ func RegisterUserRoutes(r *gin.Engine, h *handler.UserHandler, mgr *jwt.Manager,
 	users.GET("/me", h.Me)
 	users.PUT("/password", h.ChangePassword)
 }
+
+// RegisterAdminRoutes 注册管理演示路由组（S6：纵向越权回归，W9 真管理接口复用同一条链）
+func RegisterAdminRoutes(r *gin.Engine, mgr *jwt.Manager, checker middleware.RevokedChecker) {
+	admin := r.Group("/api/v1/admin", middleware.AuthRequired(mgr, checker), middleware.AdminOnly())
+	admin.GET("/ping", func(c *gin.Context) {
+		c.JSON(200, gin.H{"code": 0, "message": "success", "data": gin.H{"role": c.GetString(middleware.CtxRole)}})
+	})
+}

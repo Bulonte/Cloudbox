@@ -2,6 +2,13 @@ package model
 
 import "time"
 
+// 角色常量（规范 §6.2）：禁止散落字符串字面量；super_admin 预留 W9 管理端用
+const (
+	RoleUser       = "user"
+	RoleAdmin      = "admin"
+	RoleSuperAdmin = "super_admin"
+)
+
 // User 用户表
 type User struct {
 	ID           uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
@@ -17,3 +24,8 @@ type User struct {
 }
 
 func (User) TableName() string { return "user" }
+
+// IsAdmin 管理员放行：admin 与预留的 super_admin 均可过 AdminOnly
+func (u *User) IsAdmin() bool {
+	return u.Role == RoleAdmin || u.Role == RoleSuperAdmin
+}

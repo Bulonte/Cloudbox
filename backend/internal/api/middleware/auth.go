@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"cloudbox/internal/model"
 	"cloudbox/internal/pkg/jwt"
 	"cloudbox/internal/pkg/redis"
 	"cloudbox/internal/pkg/response"
@@ -81,11 +82,11 @@ func AuthRequired(mgr *jwt.Manager, checker RevokedChecker) gin.HandlerFunc {
 	}
 }
 
-// AdminOnly 粗检：role==admin 才放行，W3-3.5 RBAC 用
+// AdminOnly 粗检：admin 与预留的 super_admin 放行，其余 403（W3-3.5 RBAC 用）
 func AdminOnly() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		role, _ := c.Get(CtxRole)
-		if r, ok := role.(string); !ok || r != "admin" {
+		if r, ok := role.(string); !ok || (r != model.RoleAdmin && r != model.RoleSuperAdmin) {
 			response.Fail(c, http.StatusForbidden, 20003, "无权限")
 			c.Abort()
 			return

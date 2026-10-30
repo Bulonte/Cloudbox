@@ -115,7 +115,7 @@ func (s *UserService) Register(in RegisterInput) (*model.User, error) {
 		Username:     username,
 		Email:        email,
 		PasswordHash: hash,
-		Role:         "user",
+		Role:         model.RoleUser,
 		Status:       1,
 	}
 	if err := s.users.CreateUser(u); err != nil {

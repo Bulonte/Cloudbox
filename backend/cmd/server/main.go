@@ -43,6 +43,8 @@ func main() {
 	api.RegisterAuthRoutes(r, h, jwtMgr, checker)
 	// S4：/api/v1/users/me 接线 AuthRequired + Redis 吊销检查；S5 追加 PUT /password
 	api.RegisterUserRoutes(r, h, jwtMgr, checker)
+	// S6：管理演示路由纵向越权回归（W9 真管理接口复用同一条链）
+	api.RegisterAdminRoutes(r, jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

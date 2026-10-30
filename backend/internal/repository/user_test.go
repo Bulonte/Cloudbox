@@ -111,3 +111,23 @@ func TestUserRepoCreateConflict(t *testing.T) {
 		t.Fatalf("邮箱重复应返回 ErrUserConflict, 得到 %v", err)
 	}
 }
+
+func TestUserRepoFindByID(t *testing.T) {
+	repo, cleanup := newUserRepo(t)
+	defer cleanup()
+
+	u := &model.User{Username: "erin", Email: "erin@example.com", PasswordHash: "h"}
+	if err := repo.CreateUser(u); err != nil {
+		t.Fatalf("创建用户失败: %v", err)
+	}
+	got, err := repo.FindByID(u.ID)
+	if err != nil {
+		t.Fatalf("按 ID 查失败: %v", err)
+	}
+	if got.Username != "erin" {
+		t.Fatalf("查到的用户不对: %+v", got)
+	}
+	if _, err := repo.FindByID(999999); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("查不存在 ID 应返回 ErrUserNotFound, 得到 %v", err)
+	}
+}

@@ -29,6 +29,11 @@ func NewUserRepository(db *gorm.DB) *UserRepository {
 	}
 }
 
+// FindByID 按主键查；查不到返回 ErrUserNotFound（/me 用）
+func (r *UserRepository) FindByID(id uint64) (*model.User, error) {
+	return r.findOne("id = ?", id)
+}
+
 // FindByUsername 按用户名查（登录用）；查不到返回 ErrUserNotFound
 func (r *UserRepository) FindByUsername(username string) (*model.User, error) {
 	return r.findOne("username = ?", username)

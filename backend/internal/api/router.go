@@ -4,6 +4,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"cloudbox/internal/api/handler"
+	"cloudbox/internal/api/middleware"
+	"cloudbox/internal/pkg/jwt"
 )
 
 // SetupRouter 注册所有路由（无依赖：/health 健康检查，测试与本地验活用）
@@ -20,4 +22,10 @@ func RegisterAuthRoutes(r *gin.Engine, h *handler.UserHandler) {
 	auth := r.Group("/api/v1/auth")
 	auth.POST("/register", h.Register)
 	auth.POST("/login", h.Login)
+}
+
+// RegisterUserRoutes 注册需登录的用户路由组（S4：GET /me 接线 AuthRequired）
+func RegisterUserRoutes(r *gin.Engine, h *handler.UserHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
+	users := r.Group("/api/v1/users", middleware.AuthRequired(mgr, checker))
+	users.GET("/me", h.Me)
 }

@@ -6,6 +6,7 @@ import (
 
 	"cloudbox/internal/api"
 	"cloudbox/internal/api/handler"
+	"cloudbox/internal/api/middleware"
 	"cloudbox/internal/pkg/config"
 	"cloudbox/internal/pkg/jwt"
 	"cloudbox/internal/pkg/redis"
@@ -35,9 +36,12 @@ func main() {
 	}
 	rdb := redis.NewClient(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
 	r := api.SetupRouter()
-	api.RegisterAuthRoutes(r, handler.NewUserHandler(
+	h := handler.NewUserHandler(
 		service.NewUserService(repository.NewUserRepository(db)).WithLoginDeps(jwtMgr, rdb),
-	))
+	)
+	api.RegisterAuthRoutes(r, h)
+	// S4：/api/v1/users/me 接线 AuthRequired + Redis 吊销检查
+	api.RegisterUserRoutes(r, h, jwtMgr, &middleware.RedisRevokedChecker{RDB: rdb})
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

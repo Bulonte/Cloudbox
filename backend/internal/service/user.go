@@ -122,6 +122,14 @@ func (s *UserService) Register(in RegisterInput) (*model.User, error) {
 	return u, nil
 }
 
+// Profile 按用户 ID 查个人信息（/me 用）：薄封装，查不到透传 ErrUserNotFound
+func (s *UserService) Profile(userID uint64) (*model.User, error) {
+	if userID == 0 {
+		return nil, fmt.Errorf("%w: 用户 ID 非法", ErrInvalidParams)
+	}
+	return s.users.FindByID(userID)
+}
+
 // validPassword 密码规则：≥8 位且同时含字母与数字
 func validPassword(pw string) bool {
 	if len(pw) < 8 {

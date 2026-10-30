@@ -7,7 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"cloudbox/internal/api/dto"
+	"cloudbox/internal/api/middleware"
 	"cloudbox/internal/pkg/response"
+	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
 )
 
@@ -79,6 +81,22 @@ func (h *UserHandler) Login(c *gin.Context) {
 		response.Fail(c, http.StatusUnauthorized, codeUnauthorized, "账号或密码错误")
 	case errors.Is(err, service.ErrTooManyAttempts):
 		response.Fail(c, http.StatusTooManyRequests, codeTooMany, "登录尝试过于频繁请稍后再试")
+	default:
+		response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
+	}
+}
+
+// Me GET /api/v1/users/me：需 AuthRequired；token 合法但用户已被删时模糊为 20002（防枚举）
+func (h *UserHandler) Me(c *gin.Context) {
+	u, err := h.svc.Profile(c.GetUint64(middleware.CtxUserID))
+	switch {
+	case err == nil:
+		response.OK(c, dto.ToUserResponse(u))
+	case errors.Is(err, service.ErrInvalidParams):
+		response.Fail(c, http.StatusUnauthorized, codeUnauthorized, "登录已过期")
+	case errors.Is(err, repository.ErrUserNotFound):
+		// 故意不暴露 404，调用方只知凭证无效
+		response.Fail(c, http.StatusUnauthorized, codeUnauthorized, "登录已过期")
 	default:
 		response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
 	}

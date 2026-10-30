@@ -39,9 +39,10 @@ func main() {
 	h := handler.NewUserHandler(
 		service.NewUserService(repository.NewUserRepository(db)).WithLoginDeps(jwtMgr, rdb),
 	)
-	api.RegisterAuthRoutes(r, h)
-	// S4：/api/v1/users/me 接线 AuthRequired + Redis 吊销检查
-	api.RegisterUserRoutes(r, h, jwtMgr, &middleware.RedisRevokedChecker{RDB: rdb})
+	checker := &middleware.RedisRevokedChecker{RDB: rdb}
+	api.RegisterAuthRoutes(r, h, jwtMgr, checker)
+	// S4：/api/v1/users/me 接线 AuthRequired + Redis 吊销检查；S5 追加 PUT /password
+	api.RegisterUserRoutes(r, h, jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

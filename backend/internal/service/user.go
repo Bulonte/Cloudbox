@@ -39,6 +39,12 @@ const (
 	refreshTokenKeyPrefix = "refresh:"
 )
 
+// access 吊销 key 前缀（登出/改密时写，AuthRequired 查）
+const revokedKeyPrefix = "jwt:access:"
+
+// ErrInvalidRefreshToken refresh 无效（映射 HTTP 401 / code 20002，模糊防枚举）
+var ErrInvalidRefreshToken = errors.New("登录已过期")
+
 // RegisterInput 注册入参
 type RegisterInput struct {
 	Username string
@@ -181,6 +187,10 @@ func (s *UserService) Login(in LoginInput) (*TokenPair, error) {
 		}
 		return nil, fmt.Errorf("查询用户失败: %w", err)
 	}
+	// S5：停用/删除账号拒绝登录（模糊防枚举）
+	if u.Status != 1 {
+		return nil, ErrInvalidCredentials
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -224,4 +234,179 @@ func (s *UserService) Login(in LoginInput) (*TokenPair, error) {
 		RefreshToken: refresh,
 		ExpiresIn:    int64(s.jwtMgr.AccessTTL() / time.Second),
 	}, nil
+}
+
+// RefreshInput 刷新入参：凭 refresh_token 轮换新双 token（防重放：旧 jti 用后即删）
+type RefreshInput struct {
+	RefreshToken string
+}
+
+// Refresh 刷新轮换：验 refresh → 查落库一致性 → 验用户可用 → 签新对 → 先 Set 新再 Del 旧
+func (s *UserService) Refresh(in RefreshInput) (*TokenPair, error) {
+	if s.jwtMgr == nil || s.rdb == nil {
+		return nil, fmt.Errorf("登录依赖未注入")
+	}
+	if strings.TrimSpace(in.RefreshToken) == "" {
+		return nil, fmt.Errorf("%w: refresh_token 不能为空", ErrInvalidParams)
+	}
+	claims, err := s.jwtMgr.Parse(in.RefreshToken)
+	if err != nil {
+		return nil, ErrInvalidRefreshToken
+	}
+	// 必须是 refresh（拿 access 来刷直接拒绝）
+	if claims.TokenType != jwt.TokenTypeRefresh {
+		return nil, ErrInvalidRefreshToken
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stored, err := s.rdb.Get(ctx, refreshTokenKeyPrefix+claims.JTI)
+	if err != nil {
+		// key 不存在 = 已轮换/已登出/已过期，一律模糊为过期
+		return nil, ErrInvalidRefreshToken
+	}
+	if stored == "" || stored != uintToString(claims.UserID) {
+		return nil, ErrInvalidRefreshToken
+	}
+	u, err := s.users.FindByID(claims.UserID)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			// 僵尸 refresh 顺手清理
+			_ = s.rdb.Del(ctx, refreshTokenKeyPrefix+claims.JTI)
+			return nil, ErrInvalidRefreshToken
+		}
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	if u.Status != 1 {
+		_ = s.rdb.Del(ctx, refreshTokenKeyPrefix+claims.JTI)
+		return nil, ErrInvalidCredentials
+	}
+	access, _, err := s.jwtMgr.GenerateAccess(u.ID, u.Role)
+	if err != nil {
+		return nil, fmt.Errorf("签发访问 token 失败: %w", err)
+	}
+	refresh, newJTI, err := s.jwtMgr.GenerateRefresh(u.ID)
+	if err != nil {
+		return nil, fmt.Errorf("签发刷新 token 失败: %w", err)
+	}
+	// 先 Set 新再 Del 旧：崩溃时最多多一枚有效 refresh，反过来会丢登录态
+	if err := s.rdb.Set(ctx, refreshTokenKeyPrefix+newJTI, u.ID, s.jwtMgr.RefreshTTL()); err != nil {
+		return nil, fmt.Errorf("刷新 token 落库失败: %w", err)
+	}
+	if err := s.rdb.Del(ctx, refreshTokenKeyPrefix+claims.JTI); err != nil {
+		return nil, fmt.Errorf("旧刷新 token 清理失败: %w", err)
+	}
+	return &TokenPair{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresIn:    int64(s.jwtMgr.AccessTTL() / time.Second),
+	}, nil
+}
+
+// LogoutInput 登出入参：AccessJTI 由中间件注入；RefreshToken 顺手清理可空
+type LogoutInput struct {
+	AccessJTI    string
+	RefreshToken string
+}
+
+// Logout 登出：吊销本 access + 删带来的 refresh；refresh 解析失败不报错（幂等成功）
+func (s *UserService) Logout(in LogoutInput) error {
+	if s.jwtMgr == nil || s.rdb == nil {
+		return fmt.Errorf("登录依赖未注入")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if in.AccessJTI != "" {
+		if err := s.rdb.Set(ctx, revokedKeyPrefix+in.AccessJTI, "1", s.jwtMgr.AccessTTL()); err != nil {
+			return fmt.Errorf("吊销访问 token 失败: %w", err)
+		}
+	}
+	if strings.TrimSpace(in.RefreshToken) == "" {
+		return nil
+	}
+	claims, err := s.jwtMgr.Parse(in.RefreshToken)
+	if err != nil || claims.TokenType != jwt.TokenTypeRefresh {
+		return nil
+	}
+	if err := s.rdb.Del(ctx, refreshTokenKeyPrefix+claims.JTI); err != nil {
+		return fmt.Errorf("清理刷新 token 失败: %w", err)
+	}
+	return nil
+}
+
+// ChangePasswordInput 改密入参：UserID/AccessJTI 由中间件注入
+type ChangePasswordInput struct {
+	UserID       uint64
+	AccessJTI    string
+	OldPassword  string
+	NewPassword  string
+	RefreshToken string
+}
+
+// ChangePassword 改密：验旧密 → 哈希落库 → 吊销本 access 强制重登；refresh 顺手清
+func (s *UserService) ChangePassword(in ChangePasswordInput) error {
+	if s.jwtMgr == nil || s.rdb == nil {
+		return fmt.Errorf("登录依赖未注入")
+	}
+	if in.UserID == 0 {
+		return fmt.Errorf("%w: 用户 ID 非法", ErrInvalidParams)
+	}
+	if !validPassword(in.NewPassword) {
+		return fmt.Errorf("%w: 密码需8位以上且含字母和数字", ErrInvalidParams)
+	}
+	u, err := s.users.FindByID(in.UserID)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return ErrInvalidCredentials
+		}
+		return fmt.Errorf("查询用户失败: %w", err)
+	}
+	if u.Status != 1 {
+		return ErrInvalidCredentials
+	}
+	if !password.Verify(in.OldPassword, u.PasswordHash) {
+		return fmt.Errorf("%w: 旧密码不正确", ErrInvalidCredentials)
+	}
+	hash, err := password.Hash(in.NewPassword)
+	if err != nil {
+		return fmt.Errorf("密码加密失败: %w", err)
+	}
+	if err := s.users.UpdatePasswordHash(u.ID, hash); err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return ErrInvalidCredentials
+		}
+		return fmt.Errorf("更新密码失败: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// 强制本设备下线：吊销当前 access
+	if in.AccessJTI != "" {
+		if err := s.rdb.Set(ctx, revokedKeyPrefix+in.AccessJTI, "1", s.jwtMgr.AccessTTL()); err != nil {
+			return fmt.Errorf("吊销访问 token 失败: %w", err)
+		}
+	}
+	if strings.TrimSpace(in.RefreshToken) == "" {
+		return nil
+	}
+	if claims, err := s.jwtMgr.Parse(in.RefreshToken); err == nil && claims.TokenType == jwt.TokenTypeRefresh {
+		if err := s.rdb.Del(ctx, refreshTokenKeyPrefix+claims.JTI); err != nil {
+			return fmt.Errorf("清理刷新 token 失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// uintToString 用户 ID 与 Redis 落库值比对用（内存 fake 与真库统一走字符串）
+func uintToString(n uint64) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

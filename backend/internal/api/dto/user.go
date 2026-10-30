@@ -46,3 +46,19 @@ type LoginResponse struct {
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int64  `json:"expires_in"`
 }
+
+// RefreshRequest 刷新请求体：凭 refresh_token 轮换新双 token
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// LogoutRequest 登出请求体：refresh_token 可空（前端清不干净也不炸）
+type LogoutRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// ChangePasswordRequest 改密请求体：新密码复用注册同规则
+type ChangePasswordRequest struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}

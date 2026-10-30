@@ -70,6 +70,18 @@ func (r *UserRepository) CreateUser(u *model.User) error {
 	return nil
 }
 
+// UpdatePasswordHash 更新密码哈希；记录不存在返回 ErrUserNotFound（改密用）
+func (r *UserRepository) UpdatePasswordHash(id uint64, hash string) error {
+	res := r.db.Model(&model.User{}).Where("id = ?", id).Update("password_hash", hash)
+	if res.Error != nil {
+		return fmt.Errorf("更新密码: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 // findOne 条件查单条，查不到统一 ErrUserNotFound
 func (r *UserRepository) findOne(cond string, args ...any) (*model.User, error) {
 	var u model.User

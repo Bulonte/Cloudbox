@@ -32,3 +32,17 @@ func ToUserResponse(u *model.User) UserResponse {
 		UsedBytes:  u.UsedBytes,
 	}
 }
+
+// LoginRequest 登录请求体：Login 可为用户名或邮箱
+type LoginRequest struct {
+	Login    string `json:"login"`
+	Password string `json:"password"`
+}
+
+// LoginResponse 登录返回：双 token + 类型 + access 有效期秒数
+type LoginResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+}

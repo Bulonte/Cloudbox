@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"cloudbox/internal/api"
 	"cloudbox/internal/api/handler"
 	"cloudbox/internal/pkg/config"
+	"cloudbox/internal/pkg/jwt"
+	"cloudbox/internal/pkg/redis"
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
 )
@@ -20,9 +23,20 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	// S3：JWT Manager + Redis（登录签发与限流用）；密钥不足 32 字节直接 panic
+	jwtMgr, err := jwt.NewManager(
+		cfg.JWT.Secret,
+		cfg.JWT.Issuer,
+		time.Duration(cfg.JWT.AccessExpireHours)*time.Hour,
+		time.Duration(cfg.JWT.RefreshExpireHours)*time.Hour,
+	)
+	if err != nil {
+		panic(err)
+	}
+	rdb := redis.NewClient(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
 	r := api.SetupRouter()
 	api.RegisterAuthRoutes(r, handler.NewUserHandler(
-		service.NewUserService(repository.NewUserRepository(db)),
+		service.NewUserService(repository.NewUserRepository(db)).WithLoginDeps(jwtMgr, rdb),
 	))
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)

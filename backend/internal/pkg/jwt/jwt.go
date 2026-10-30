@@ -149,3 +149,13 @@ func (m *Manager) ParseAccess(tokenString string) (*Claims, error) {
 func RevokedKey(jti string) string {
 	return RevokedKeyPrefix + jti
 }
+
+// AccessTTL 访问 token 有效期（登录返回 expires_in 用）
+func (m *Manager) AccessTTL() time.Duration {
+	return m.accessTTL
+}
+
+// RefreshTTL 刷新 token 有效期（refresh 落库 TTL 用）
+func (m *Manager) RefreshTTL() time.Duration {
+	return m.refreshTTL
+}

@@ -15,8 +15,9 @@ func SetupRouter() *gin.Engine {
 }
 
 // RegisterAuthRoutes 注册认证路由组（需外部注入已接好 DB 的 handler）
-// S2 仅注册 POST /register；login/refresh 留给 S3
+// S2 注册 POST /register；S3 追加 POST /login；refresh/logout 留给 S5
 func RegisterAuthRoutes(r *gin.Engine, h *handler.UserHandler) {
 	auth := r.Group("/api/v1/auth")
 	auth.POST("/register", h.Register)
+	auth.POST("/login", h.Login)
 }

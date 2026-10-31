@@ -45,17 +45,20 @@ func newFileRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	if err != nil {
 		t.Fatalf("NewManager 失败: %v", err)
 	}
-	fh := handler.NewFileHandler(service.NewFileService(repository.NewFileRepository(db)))
+	fileRepo := repository.NewFileRepository(db)
+	// 测试存储与上传/下载接线（S6/S7）
 	st, err := storage.NewLocalStorage(t.TempDir())
 	if err != nil {
 		t.Fatalf("建测试存储失败: %v", err)
 	}
-	fh.WithUploader(upload.NewUploadService(repository.NewFileRepository(db), st, upload.MaxSimpleUploadSize))
+	fh := handler.NewFileHandler(service.NewFileService(fileRepo).WithStorage(st))
+	fh.WithUploader(upload.NewUploadService(fileRepo, st, upload.MaxSimpleUploadSize))
 	r := gin.New()
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, &fakeRevoked{}))
 	files.GET("", fh.ListFiles)
 	files.POST("", fh.UploadFile)
 	files.POST("/folders", fh.CreateFolder)
+	files.GET("/:id/download", fh.DownloadFile)
 	files.PUT("/:id", fh.UpdateFile)
 	files.DELETE("/:id", fh.DeleteFile)
 	return r, mgr

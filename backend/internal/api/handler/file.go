@@ -3,7 +3,9 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -167,6 +169,42 @@ func parseParentID(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
 }
 
+// DownloadFile GET /api/v1/files/:id/download：鉴权 → 归属 → 流式回写
+func (h *FileHandler) DownloadFile(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	f, rc, size, err := h.svc.Download(c.GetUint64(middleware.CtxUserID), id)
+	if err != nil {
+		h.failFile(c, err)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	ctype := contentTypeOf(f.MimeType)
+	c.Header("Content-Type", ctype)
+	c.Header("Content-Disposition", attachmentOf(f.FileName))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.DataFromReader(http.StatusOK, size, ctype, rc, nil)
+}
+
+// contentTypeOf 下载 Content-Type：只信服务端入库值，空则回退 octet-stream
+func contentTypeOf(mime string) string {
+	m := strings.TrimSpace(mime)
+	if m == "" {
+		return "application/octet-stream"
+	}
+	return m
+}
+
+// attachmentOf 强制附件下载：双写 filename + filename*（中文/空格可下）
+func attachmentOf(name string) string {
+	escaped := strings.ReplaceAll(name, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `attachment; filename="` + escaped + `"; filename*=UTF-8''` + url.PathEscape(name)
+}
+
 // ListFiles GET /api/v1/files：按 parent 分页（夹置顶）；空目录 items=[] 非 null
 func (h *FileHandler) ListFiles(c *gin.Context) {
 	var q dto.ListFilesQuery
@@ -190,6 +228,7 @@ func (h *FileHandler) ListFiles(c *gin.Context) {
 func (h *FileHandler) failFile(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrInvalidParams),
+		errors.Is(err, service.ErrNotDownloadable),
 		errors.Is(err, upload.ErrTooLarge),
 		errors.Is(err, upload.ErrUnsupportedExt),
 		errors.Is(err, upload.ErrMimeMismatch),

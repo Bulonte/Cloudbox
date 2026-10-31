@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
+	"cloudbox/internal/storage"
 )
 
 // ErrFileNotFound 文件不存在（含越权/已删统一伪装），复用仓储层哨兵
@@ -20,14 +22,24 @@ var ErrInvalidParent = repository.ErrInvalidParent
 // ErrFileConflict 同名文件已存在，复用仓储层哨兵
 var ErrFileConflict = repository.ErrFileConflict
 
+// ErrNotDownloadable 文件夹/不可下载类型
+var ErrNotDownloadable = errors.New("文件夹不支持下载")
+
 // FileService 文件业务：薄层，归属判定留在仓储 SQL，只做参数规则
 type FileService struct {
 	files *repository.FileRepository
+	store storage.Storage
 }
 
 // NewFileService 构造注入文件仓储
 func NewFileService(files *repository.FileRepository) *FileService {
 	return &FileService{files: files}
+}
+
+// WithStorage 注入存储适配（S7 流式下载用），返回同一实例方便链式调用
+func (s *FileService) WithStorage(st storage.Storage) *FileService {
+	s.store = st
+	return s
 }
 
 // validFileName 文件名规则：1~255 字符，禁 / \，trim 后非空
@@ -120,6 +132,40 @@ func (s *FileService) rejectCycle(ownerID, id, parentID uint64) error {
 // Delete 软删（不释放配额，W9 回收站彻底删除时释放）
 func (s *FileService) Delete(ownerID, id uint64) error {
 	return s.files.SoftDelete(id, ownerID)
+}
+
+// Download 下载编排：归属 SQL 过滤 → Stat 取真值 → Open 取流；调用方负责 Close
+func (s *FileService) Download(ownerID, id uint64) (*model.File, io.ReadCloser, int64, error) {
+	if ownerID == 0 || id == 0 {
+		return nil, nil, 0, ErrInvalidParams
+	}
+	if s.store == nil {
+		return nil, nil, 0, fmt.Errorf("存储未注入")
+	}
+	f, err := s.files.FindByID(id, ownerID)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if err := checkDownloadable(f); err != nil {
+		return nil, nil, 0, err
+	}
+	size, err := s.store.Stat(f.FilePath)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("读取存储大小: %w", err)
+	}
+	rc, err := s.store.Open(f.FilePath)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("打开存储对象: %w", err)
+	}
+	return f, rc, size, nil
+}
+
+// checkDownloadable 文件夹不可下载
+func checkDownloadable(f *model.File) error {
+	if f.IsFolder == 1 {
+		return ErrNotDownloadable
+	}
+	return nil
 }
 
 // List 分页列表：归一化分页后透传仓储（SQL 已带归属隔离，他人 parent 天然 total=0）

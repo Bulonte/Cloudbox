@@ -118,6 +118,25 @@ func (h *FileHandler) DeleteFile(c *gin.Context) {
 	response.OK(c, nil)
 }
 
+// ListFiles GET /api/v1/files：按 parent 分页（夹置顶）；空目录 items=[] 非 null
+func (h *FileHandler) ListFiles(c *gin.Context) {
+	var q dto.ListFilesQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	files, total, page, pageSize, err := h.svc.List(c.GetUint64(middleware.CtxUserID), q.ParentID, q.Page, q.PageSize)
+	if err != nil {
+		h.failFile(c, err)
+		return
+	}
+	items := make([]dto.FileResponse, 0, len(files))
+	for _, f := range files {
+		items = append(items, ToFileResponse(f))
+	}
+	response.OK(c, dto.FileListResponse{Total: total, Page: page, PageSize: pageSize, Items: items})
+}
+
 // failFile 文件错误统一映射：越权/已删/父夹非法一律 404 伪装
 func (h *FileHandler) failFile(c *gin.Context, err error) {
 	switch {

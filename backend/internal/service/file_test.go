@@ -98,3 +98,32 @@ func TestFileServiceRenameMoveDelete(t *testing.T) {
 		t.Fatalf("他人删应 ErrFileNotFound, 得到 %v", err)
 	}
 }
+
+func TestFileServiceList(t *testing.T) {
+	svc, cleanup := newFileService(t)
+	defer cleanup()
+
+	if _, err := svc.CreateFolder(1, "a", 0); err != nil {
+		t.Fatalf("建夹失败: %v", err)
+	}
+	if _, err := svc.CreateFolder(1, "b", 0); err != nil {
+		t.Fatalf("建夹失败: %v", err)
+	}
+
+	files, total, page, size, err := svc.List(1, 0, 0, 0)
+	if err != nil || total != 2 || page != 1 || size != 20 || len(files) != 2 {
+		t.Fatalf("缺省分页不对: total=%d page=%d size=%d len=%d err=%v", total, page, size, len(files), err)
+	}
+	_, _, _, size, err = svc.List(1, 0, 1, 5000)
+	if err != nil || size != 1000 {
+		t.Fatalf("超大size应截1000, size=%d err=%v", size, err)
+	}
+	files, total, _, _, err = svc.List(1, 0, 99, 20)
+	if err != nil || total != 2 || len(files) != 0 {
+		t.Fatalf("超大page应空页: total=%d len=%d err=%v", total, len(files), err)
+	}
+	_, total, _, _, err = svc.List(2, 0, 1, 20)
+	if err != nil || total != 0 {
+		t.Fatalf("他人应 total=0, total=%d err=%v", total, err)
+	}
+}

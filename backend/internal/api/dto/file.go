@@ -24,3 +24,18 @@ type FileResponse struct {
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
+
+// ListFilesQuery 列表查询：parent_id 缺省 0（根）；page/page_size 缺省 1/20
+type ListFilesQuery struct {
+	ParentID uint64 `form:"parent_id"`
+	Page     int    `form:"page"`
+	PageSize int    `form:"page_size"`
+}
+
+// FileListResponse 分页列表返回：items 恒为数组（空目录 [] 非 null）
+type FileListResponse struct {
+	Total    int64          `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"page_size"`
+	Items    []FileResponse `json:"items"`
+}

@@ -121,3 +121,22 @@ func (s *FileService) rejectCycle(ownerID, id, parentID uint64) error {
 func (s *FileService) Delete(ownerID, id uint64) error {
 	return s.files.SoftDelete(id, ownerID)
 }
+
+// List 分页列表：归一化分页后透传仓储（SQL 已带归属隔离，他人 parent 天然 total=0）
+func (s *FileService) List(ownerID, parentID uint64, page, pageSize int) ([]*model.File, int64, int, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 1000 {
+		pageSize = 1000
+	}
+	offset := (page - 1) * pageSize
+	files, total, err := s.files.ListByParent(ownerID, parentID, offset, pageSize)
+	if err != nil {
+		return nil, 0, page, pageSize, err
+	}
+	return files, total, page, pageSize, nil
+}

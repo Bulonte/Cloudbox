@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +46,7 @@ func newFileRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	fh := handler.NewFileHandler(service.NewFileService(repository.NewFileRepository(db)))
 	r := gin.New()
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, &fakeRevoked{}))
+	files.GET("", fh.ListFiles)
 	files.POST("/folders", fh.CreateFolder)
 	files.PUT("/:id", fh.UpdateFile)
 	files.DELETE("/:id", fh.DeleteFile)
@@ -234,5 +236,107 @@ func TestFolderUnauthorized(t *testing.T) {
 	}
 	if code, _, _ := decodeBody(t, w); code != 20001 {
 		t.Fatalf("code = %d, 期望 20001 %s", code, w.Body.String())
+	}
+}
+
+func decodeList(t *testing.T, w *httptest.ResponseRecorder) (int, int64, int, int, []map[string]any) {
+	t.Helper()
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Total    int64            `json:"total"`
+			Page     int              `json:"page"`
+			PageSize int              `json:"page_size"`
+			Items    []map[string]any `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("列表响应非JSON: %v body=%s", err, w.Body.String())
+	}
+	return resp.Code, resp.Data.Total, resp.Data.Page, resp.Data.PageSize, resp.Data.Items
+}
+
+// TestListPagination 分页归一化：page=0 按 1 查；超大 page_size 截断；超大 page 空页
+func TestListPagination(t *testing.T) {
+	r, mgr := newFileRouter(t)
+	a := tok(t, mgr, 1)
+
+	for _, n := range []string{"d1", "d2", "z1"} {
+		if w := doFile(r, http.MethodPost, "/api/v1/files/folders", fmt.Sprintf(`{"file_name":"%s"}`, n), a); w.Code != http.StatusOK {
+			t.Fatalf("建夹失败: %d %s", w.Code, w.Body.String())
+		}
+	}
+
+	// page=0 → 按 page=1
+	w := doFile(r, http.MethodGet, "/api/v1/files?page=0&page_size=2", "", a)
+	code, total, page, _, items := decodeList(t, w)
+	if w.Code != http.StatusOK || code != 0 || total != 3 || page != 1 || len(items) != 2 {
+		t.Fatalf("page=0 归一不对: status=%d code=%d total=%d page=%d len=%d body=%s", w.Code, code, total, page, len(items), w.Body.String())
+	}
+	// 超大 page_size 截断不断
+	w = doFile(r, http.MethodGet, "/api/v1/files?page=1&page_size=5000", "", a)
+	code, total, _, size, items := decodeList(t, w)
+	if w.Code != http.StatusOK || code != 0 || size != 1000 || len(items) != 3 || total != 3 {
+		t.Fatalf("超大size截断不对: code=%d total=%d size=%d len=%d body=%s", code, total, size, len(items), w.Body.String())
+	}
+	// 超大 page → 空页但 total 照常
+	w = doFile(r, http.MethodGet, "/api/v1/files?page=999&page_size=20", "", a)
+	code, total, _, _, items = decodeList(t, w)
+	if w.Code != http.StatusOK || code != 0 || total != 3 || len(items) != 0 {
+		t.Fatalf("超大page不对: code=%d total=%d len=%d body=%s", code, total, len(items), w.Body.String())
+	}
+	// 非法 page → 400/10001
+	w = doFile(r, http.MethodGet, "/api/v1/files?page=abc", "", a)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非法page应 400, 得到 %d %s", w.Code, w.Body.String())
+	}
+	if code, _, _ := decodeBody(t, w); code != 10001 {
+		t.Fatalf("code = %d, 期望 10001 %s", code, w.Body.String())
+	}
+}
+
+// TestListIsolation 列表天然隔离：bob 看不见 alice 的；猜 parent_id 也 total=0
+func TestListIsolation(t *testing.T) {
+	r, mgr := newFileRouter(t)
+	a := tok(t, mgr, 1)
+	b := tok(t, mgr, 2)
+
+	w := doFile(r, http.MethodPost, "/api/v1/files/folders", `{"file_name":"priv"}`, a)
+	_, _, p := decodeBody(t, w)
+	pid := uint64(p["id"].(float64))
+
+	w = doFile(r, http.MethodGet, "/api/v1/files", "", b)
+	if _, total, _, _, _ := decodeList(t, w); total != 0 {
+		t.Fatalf("他人根目录应 total=0, body=%s", w.Body.String())
+	}
+	w = doFile(r, http.MethodGet, fmt.Sprintf("/api/v1/files?parent_id=%d", pid), "", b)
+	if _, total, _, _, _ := decodeList(t, w); total != 0 {
+		t.Fatalf("猜他人parent应 total=0, body=%s", w.Body.String())
+	}
+}
+
+// TestListShape 空目录 items=[] 非 null；夹置顶
+func TestListShape(t *testing.T) {
+	r, mgr := newFileRouter(t)
+	a := tok(t, mgr, 1)
+
+	// 空根
+	w := doFile(r, http.MethodGet, "/api/v1/files", "", a)
+	code, total, _, _, items := decodeList(t, w)
+	if code != 0 || total != 0 || items == nil || len(items) != 0 {
+		t.Fatalf("空目录应 total=0 items=[], body=%s", w.Body.String())
+	}
+	if !json.Valid([]byte(`{"items":[]}`)) {
+		t.Fatal("unreachable")
+	}
+
+	// 先文件后夹：夹置顶
+	w = doFile(r, http.MethodPost, "/api/v1/files/folders", `{"file_name":"zz"}`, a)
+	_, _, zd := decodeBody(t, w)
+	_ = zd
+	w = doFile(r, http.MethodGet, "/api/v1/files", "", a)
+	_, _, _, _, items = decodeList(t, w)
+	if len(items) != 1 || items[0]["is_folder"] != float64(1) {
+		t.Fatalf("夹应置顶: %v body=%s", items, w.Body.String())
 	}
 }

@@ -30,6 +30,11 @@ type Config struct {
 		Driver   string `mapstructure:"driver"`
 		LocalDir string `mapstructure:"local_dir"`
 	} `mapstructure:"storage"`
+	Upload struct {
+		MaxSimpleSize int64 `mapstructure:"max_simple_size"`
+		MaxFileSize   int64 `mapstructure:"max_file_size"`
+		MaxChunks     int   `mapstructure:"max_chunks"`
+	} `mapstructure:"upload"`
 }
 
 // devJWTSecret 仅本地开发默认值；prod 用它直接报错，逼配真密钥
@@ -54,6 +59,9 @@ func Load() (*Config, error) {
 	v.SetDefault("jwt.issuer", "cloudbox")
 	v.SetDefault("storage.driver", "local")
 	v.SetDefault("storage.local_dir", "./storage/uploads")
+	v.SetDefault("upload.max_simple_size", 2*1024*1024)
+	v.SetDefault("upload.max_file_size", 5*1024*1024*1024)
+	v.SetDefault("upload.max_chunks", 10000)
 
 	v.AutomaticEnv()
 	_ = v.BindEnv("app.port", "APP_PORT")
@@ -69,6 +77,9 @@ func Load() (*Config, error) {
 	_ = v.BindEnv("jwt.issuer", "JWT_ISSUER")
 	_ = v.BindEnv("storage.driver", "STORAGE_DRIVER")
 	_ = v.BindEnv("storage.local_dir", "STORAGE_LOCAL_DIR")
+	_ = v.BindEnv("upload.max_simple_size", "UPLOAD_MAX_SIMPLE_SIZE")
+	_ = v.BindEnv("upload.max_file_size", "UPLOAD_MAX_FILE_SIZE")
+	_ = v.BindEnv("upload.max_chunks", "UPLOAD_MAX_CHUNKS")
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {

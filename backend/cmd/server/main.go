@@ -45,6 +45,9 @@ func main() {
 	api.RegisterUserRoutes(r, h, jwtMgr, checker)
 	// S6：管理演示路由纵向越权回归（W9 真管理接口复用同一条链）
 	api.RegisterAdminRoutes(r, jwtMgr, checker)
+	// W4-S2：文件夹 CRUD 路由接线（建夹/改名移动/软删）
+	fh := handler.NewFileHandler(service.NewFileService(repository.NewFileRepository(db)))
+	api.RegisterFileRoutes(r, fh, jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

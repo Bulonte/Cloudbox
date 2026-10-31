@@ -12,6 +12,7 @@ type File struct {
 	FileHash   string          `gorm:"size:64;uniqueIndex:uk_hash;not null" json:"file_hash"`
 	FileSize   uint64          `gorm:"default:0;not null" json:"file_size"`
 	FilePath   string          `gorm:"size:500;not null" json:"file_path"`
+	MimeType   string          `gorm:"size:64;default:'';not null" json:"mime_type"`
 	ParentID   uint64          `gorm:"default:0;not null;index:idx_parent_deleted" json:"parent_id"`
 	OwnerID    uint64          `gorm:"not null;index:idx_owner_deleted" json:"owner_id"`
 	IsFolder   int8            `gorm:"default:0;not null" json:"is_folder"`

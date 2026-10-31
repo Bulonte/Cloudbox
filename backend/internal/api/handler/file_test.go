@@ -19,6 +19,8 @@ import (
 	"cloudbox/internal/pkg/jwt"
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
+	"cloudbox/internal/service/upload"
+	"cloudbox/internal/storage"
 )
 
 const fileTestSecret = "file-test-secret-please-32bytes!!!"
@@ -44,9 +46,15 @@ func newFileRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 		t.Fatalf("NewManager 失败: %v", err)
 	}
 	fh := handler.NewFileHandler(service.NewFileService(repository.NewFileRepository(db)))
+	st, err := storage.NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("建测试存储失败: %v", err)
+	}
+	fh.WithUploader(upload.NewUploadService(repository.NewFileRepository(db), st, upload.MaxSimpleUploadSize))
 	r := gin.New()
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, &fakeRevoked{}))
 	files.GET("", fh.ListFiles)
+	files.POST("", fh.UploadFile)
 	files.POST("/folders", fh.CreateFolder)
 	files.PUT("/:id", fh.UpdateFile)
 	files.DELETE("/:id", fh.DeleteFile)

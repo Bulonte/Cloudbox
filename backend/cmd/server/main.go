@@ -12,6 +12,8 @@ import (
 	"cloudbox/internal/pkg/redis"
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
+	"cloudbox/internal/service/upload"
+	"cloudbox/internal/storage"
 )
 
 func main() {
@@ -46,7 +48,14 @@ func main() {
 	// S6：管理演示路由纵向越权回归（W9 真管理接口复用同一条链）
 	api.RegisterAdminRoutes(r, jwtMgr, checker)
 	// W4-S2：文件夹 CRUD 路由接线（建夹/改名移动/软删）
-	fh := handler.NewFileHandler(service.NewFileService(repository.NewFileRepository(db)))
+	fileRepo := repository.NewFileRepository(db)
+	fh := handler.NewFileHandler(service.NewFileService(fileRepo))
+	// W4-S6：单文件上传接线（S4 内容寻址 + S5 限额）；存储根创建失败直接 panic
+	st, err := storage.NewLocalStorage(cfg.Storage.LocalDir)
+	if err != nil {
+		panic(err)
+	}
+	fh.WithUploader(upload.NewUploadService(fileRepo, st, cfg.Upload.MaxSimpleSize))
 	api.RegisterFileRoutes(r, fh, jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)

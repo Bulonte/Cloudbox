@@ -57,12 +57,13 @@ temp/
 *.tmp
 *.swp
 
-# ---------- 数据库与存储数据 ----------
+# ---------- 数据库与存储数据（仅数据目录，不含 backend/internal/storageGo 包） ----------
 docker/mysql/data/
 docker/redis/data/
-data/
-storage/
-uploads/
+/data/
+/storage/
+backend/storage/
+/uploads/
 *.db
 *.sqlite
 *.sqlite3

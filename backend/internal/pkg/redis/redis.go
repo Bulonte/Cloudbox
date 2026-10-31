@@ -49,6 +49,16 @@ func (c *Client) Del(ctx context.Context, keys ...string) error {
 	return c.rdb.Del(ctx, keys...).Err()
 }
 
+// Incr 计数器+1（登录限流用）；key 不存在时从 1 开始
+func (c *Client) Incr(ctx context.Context, key string) (int64, error) {
+	return c.rdb.Incr(ctx, key).Result()
+}
+
+// Expire 设置过期（登录限流窗口用）
+func (c *Client) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	return c.rdb.Expire(ctx, key, ttl).Err()
+}
+
 // IsNil key 不存在（goredis.Nil），供调用方区分"无值"与"真错误"
 func IsNil(err error) bool {
 	return err == goredis.Nil

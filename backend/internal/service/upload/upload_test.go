@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/sqlite"
@@ -139,5 +140,22 @@ func TestUploadDuplicateHash(t *testing.T) {
 	// 同内容二次传：uk_hash 全局唯一 → ErrFileConflict（W5 转被动秒传前按 409 闭合）
 	if _, err := s.Upload(1, 0, "b.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); !errors.Is(err, ErrFileConflict) {
 		t.Fatalf("二次同 hash 应 ErrFileConflict, 得到 %v", err)
+	}
+}
+
+func TestUploadLongChineseFileName(t *testing.T) {
+	// 86 汉字（≈258 字节）：按 rune 计 86+4（.pdf）≤255 应放行（Bugbot 回归）
+	name := strings.Repeat("测", 86) + ".pdf"
+	if !validFileName(name) {
+		t.Fatalf("86 汉字文件名应放行")
+	}
+	s := newUploadService(t)
+	if _, err := s.Upload(1, 0, name, bytes.NewReader(pdfHead), int64(len(pdfHead))); err != nil {
+		t.Fatalf("中文长名上传失败: %v", err)
+	}
+	// 252 汉字 + .pdf = 256 rune 应拒
+	tooLong := strings.Repeat("测", 252) + ".pdf"
+	if validFileName(tooLong) {
+		t.Fatalf("256 rune 应拒")
 	}
 }

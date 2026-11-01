@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
@@ -49,10 +50,10 @@ func (s *UploadService) MaxSimpleSize() int64 {
 	return s.maxSimple
 }
 
-// validFileName 文件名规则：与 service/file.go 同口径（trim 后非空、≤255、禁 / \）
+// validFileName 文件名规则：与 service/file.go 同口径（trim 后非空、≤255 rune、禁 / \）
 func validFileName(name string) bool {
 	n := strings.TrimSpace(name)
-	if n == "" || len(name) > 255 {
+	if n == "" || utf8.RuneCountInString(n) > 255 {
 		return false
 	}
 	return !strings.ContainsAny(n, "/\\\x00")

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
@@ -42,10 +43,10 @@ func (s *FileService) WithStorage(st storage.Storage) *FileService {
 	return s
 }
 
-// validFileName 文件名规则：1~255 字符，禁 / \，trim 后非空
+// validFileName 文件名规则：1~255 字符（按 rune 计，utf8mb4 VARCHAR(255) 语义），禁 / \，trim 后非空
 func validFileName(name string) bool {
 	n := strings.TrimSpace(name)
-	if n == "" || len(name) > 255 {
+	if n == "" || utf8.RuneCountInString(n) > 255 {
 		return false
 	}
 	return !strings.ContainsAny(n, "/\\\x00")

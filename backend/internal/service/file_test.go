@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/sqlite"
@@ -126,4 +127,28 @@ func TestFileServiceList(t *testing.T) {
 	if err != nil || total != 0 {
 		t.Fatalf("他人应 total=0, total=%d err=%v", total, err)
 	}
+}
+
+func TestFileNameRuneLimit(t *testing.T) {
+	// 86 汉字 ≈258 字节：按 rune 计 86≤255 应放行（Bugbot 回归：旧 len 按字节会误拒）
+	longCN := strings.Repeat("测", 100)
+	if !validFileName(longCN) {
+		t.Fatalf("100 汉字文件名应放行")
+	}
+	if _, err := newFileServiceForRune(t, longCN); err != nil {
+		t.Fatalf("100 汉字建夹失败: %v", err)
+	}
+	// 256 rune 无论中英文都拒
+	if validFileName(strings.Repeat("a", 256)) {
+		t.Fatalf("256 ASCII 应拒")
+	}
+	if validFileName(strings.Repeat("测", 256)) {
+		t.Fatalf("256 汉字应拒")
+	}
+}
+
+func newFileServiceForRune(t *testing.T, name string) (*model.File, error) {
+	svc, cleanup := newFileService(t)
+	defer cleanup()
+	return svc.CreateFolder(1, name, 0)
 }

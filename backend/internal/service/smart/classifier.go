@@ -79,22 +79,17 @@ type Classifier interface {
 	Classify(filename string, text string) Result
 }
 
-// keywordWeight 关键词权重（W4-4.7 从 category_keyword 表加载 ≥25/类后替换此处种子表）
+// keywordWeight 关键词权重（生产唯一来源：category_keyword 表经 RuleLoader 加载）
 type keywordWeight struct {
 	cat    Category
 	weight float64
 }
 
-// seedKeywords 骨架种子：每类 3–5 个，证明算法可跑；W4 RuleLoader 落地后删除
-var seedKeywords = map[string]keywordWeight{
+// testFallbackKeywords 单测最小回退（仅测试用，生产必须经 RuleLoader 从表加载）
+var testFallbackKeywords = map[string]keywordWeight{
 	"合同": {CategoryContract, 1.0}, "甲方": {CategoryContract, 1.0}, "乙方": {CategoryContract, 1.0}, "违约金": {CategoryContract, 2.0},
 	"简历": {CategoryResume, 1.0}, "求职": {CategoryResume, 1.0}, "工作经历": {CategoryResume, 1.5}, "教育背景": {CategoryResume, 1.5},
-	"报表": {CategoryReport, 1.0}, "财务": {CategoryReport, 1.0}, "营收": {CategoryReport, 1.0}, "利润": {CategoryReport, 1.0}, "统计": {CategoryReport, 1.0},
-	"图片": {CategoryImage, 1.0}, "照片": {CategoryImage, 1.0}, "截图": {CategoryImage, 1.0}, "摄影": {CategoryImage, 1.0},
-	"视频": {CategoryVideo, 1.0}, "电影": {CategoryVideo, 1.0}, "录像": {CategoryVideo, 1.0}, "剪辑": {CategoryVideo, 1.0},
-	"音频": {CategoryAudio, 1.0}, "音乐": {CategoryAudio, 1.0}, "歌曲": {CategoryAudio, 1.0}, "录音": {CategoryAudio, 1.0}, "专辑": {CategoryAudio, 1.0},
-	"文档": {CategoryDocument, 1.0}, "手册": {CategoryDocument, 1.0}, "教程": {CategoryDocument, 1.0}, "笔记": {CategoryDocument, 1.0}, "说明": {CategoryDocument, 1.0},
-	"压缩": {CategoryArchive, 1.0}, "解压": {CategoryArchive, 1.0}, "打包": {CategoryArchive, 1.0}, "归档": {CategoryArchive, 1.0},
+	"报表": {CategoryReport, 1.0}, "财务": {CategoryReport, 1.0}, "营收": {CategoryReport, 1.0},
 }
 
 // extCategory 扩展名直判：媒体四类 + 文档/报表（合同/简历扩展名与文档重叠，不做伪智能）
@@ -116,9 +111,17 @@ type RuleClassifier struct {
 	kws map[string]keywordWeight
 }
 
-// NewRuleClassifier 默认骨架（种子表）；W4 接 RuleLoader 后改从表加载
+// NewRuleClassifier 单测默认构造（最小回退表）；生产必须经 RuleLoader 从表加载后调 NewRuleClassifierWithKeywords
 func NewRuleClassifier() *RuleClassifier {
-	return &RuleClassifier{ext: extCategory, kws: seedKeywords}
+	return &RuleClassifier{ext: extCategory, kws: testFallbackKeywords}
+}
+
+// NewRuleClassifierWithKeywords 生产入口：关键词表来自 RuleLoader.Load（category_keyword 表）
+func NewRuleClassifierWithKeywords(kws map[string]keywordWeight) *RuleClassifier {
+	if len(kws) == 0 {
+		kws = testFallbackKeywords
+	}
+	return &RuleClassifier{ext: extCategory, kws: kws}
 }
 
 // Classify 三段式：扩展名直判 → 关键词加权 → 其他兜底

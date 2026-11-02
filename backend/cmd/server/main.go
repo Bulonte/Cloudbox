@@ -57,6 +57,9 @@ func main() {
 	fh := handler.NewFileHandler(service.NewFileService(fileRepo).WithStorage(st))
 	fh.WithUploader(upload.NewUploadService(fileRepo, st, cfg.Upload.MaxSimpleSize))
 	api.RegisterFileRoutes(r, fh, jwtMgr, checker)
+	// W5-S1：分片会话初始化路由接线（init 只建占位行，不碰 storage/Redis）
+	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks)
+	api.RegisterUploadRoutes(r, handler.NewChunkHandler(chunkSvc), jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

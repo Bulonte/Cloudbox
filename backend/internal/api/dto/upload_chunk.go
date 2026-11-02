@@ -26,3 +26,9 @@ type UploadChunkResponse struct {
 	Size       uint64 `json:"size"`
 	Status     int8   `json:"status"`
 }
+
+// CompleteUploadRequest 分片合并请求体（S1 占位行没存 file_name/parent_id，合并时重提重校验）
+type CompleteUploadRequest struct {
+	FileName string `json:"file_name"`
+	ParentID uint64 `json:"parent_id"`
+}

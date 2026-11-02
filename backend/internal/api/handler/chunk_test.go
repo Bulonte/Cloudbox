@@ -2,10 +2,13 @@ package handler_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +23,7 @@ import (
 	"cloudbox/internal/pkg/jwt"
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
+	"cloudbox/internal/storage"
 )
 
 const chunkTestSecret = "chunk-test-secret-please-32bytes!!"
@@ -43,13 +47,23 @@ func newChunkRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	if err != nil {
 		t.Fatalf("NewManager 失败: %v", err)
 	}
-	svc := service.NewChunkService(repository.NewFileRepository(db), repository.NewUserRepository(db), repository.NewChunkRepository(db), service.DefaultMaxFileSize, service.DefaultMaxChunks).WithTmpDir(t.TempDir())
+	svc := service.NewChunkService(repository.NewFileRepository(db), repository.NewUserRepository(db), repository.NewChunkRepository(db), service.DefaultMaxFileSize, service.DefaultMaxChunks).WithTmpDir(t.TempDir()).WithStorage(mustTestStorage(t))
 	ch := handler.NewChunkHandler(svc)
 	r := gin.New()
 	up := r.Group("/api/v1/uploads", middleware.AuthRequired(mgr, &fakeRevoked{}))
 	up.POST("/init", ch.InitUpload)
 	up.POST("/:id/chunks", ch.UploadChunk)
+	up.POST("/:id/complete", ch.CompleteUpload)
 	return r, mgr
+}
+
+func mustTestStorage(t *testing.T) *storage.LocalStorage {
+	t.Helper()
+	st, err := storage.NewLocalStorage(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("建测试存储失败: %v", err)
+	}
+	return st
 }
 
 func doChunk(r *gin.Engine, method, path, body, token string) *httptest.ResponseRecorder {
@@ -212,5 +226,86 @@ func TestChunkUploadAPI(t *testing.T) {
 	w = postChunk(r, id, "1", []byte("x"), "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("无头应 401, 得到 %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestChunkCompleteAPI(t *testing.T) {
+	r, mgr := newChunkRouter(t)
+	a := tok(t, mgr, 1)
+
+	content := []byte("hello-chunk-merge-api-0123456789-abcdef")
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	cs := uint64(10)
+	total := uint64(len(content))
+	n := uint32((total + cs - 1) / cs)
+	initBody := fmt.Sprintf(`{"file_name":"a.txt","parent_id":0,"file_hash":%q,"total_size":%d,"total_chunks":%d,"chunk_size":%d}`, hash, total, n, cs)
+	w := doChunk(r, http.MethodPost, "/api/v1/uploads/init", initBody, a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("init 应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	_, _, initData := decodeBody(t, w)
+	id, _ := initData["upload_id"].(string)
+
+	// 缺片直接 complete → 400/10001
+	bad := doChunk(r, http.MethodPost, "/api/v1/uploads/"+id+"/complete", `{"file_name":"a.txt","parent_id":0}`, a)
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("缺片合并应 400, 得到 %d %s", bad.Code, bad.Body.String())
+	}
+	if code, _, _ := decodeBody(t, bad); code != 10001 {
+		t.Fatalf("code = %d, 期望 10001 %s", code, bad.Body.String())
+	}
+
+	// 传全部分片
+	for i := uint32(0); i < n; i++ {
+		s, e := uint64(i)*cs, uint64(i+1)*cs
+		if e > total {
+			e = total
+		}
+		if w := postChunk(r, id, fmt.Sprint(i), content[s:e], a); w.Code != http.StatusOK {
+			t.Fatalf("传片 %d 应 200, 得到 %d %s", i, w.Code, w.Body.String())
+		}
+	}
+
+	// 正常合并 → 200，file_name/size 回显
+	w = doChunk(r, http.MethodPost, "/api/v1/uploads/"+id+"/complete", `{"file_name":"a.txt","parent_id":0}`, a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("合并应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	code, _, data := decodeBody(t, w)
+	if code != 0 || data["file_name"] != "a.txt" {
+		t.Fatalf("合并回显不对: code=%d data=%v %s", code, data, w.Body.String())
+	}
+	if sz, _ := data["file_size"].(float64); uint64(sz) != total {
+		t.Fatalf("大小不对: %v 期望 %d %s", data["file_size"], total, w.Body.String())
+	}
+
+	// 重复合并幂等 → 200 同一 id
+	w2 := doChunk(r, http.MethodPost, "/api/v1/uploads/"+id+"/complete", `{"file_name":"a.txt","parent_id":0}`, a)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("重复合并应 200, 得到 %d %s", w2.Code, w2.Body.String())
+	}
+	_, _, data2 := decodeBody(t, w2)
+	if data2["id"] != data["id"] {
+		t.Fatalf("幂等应同 id: %v vs %v", data2["id"], data["id"])
+	}
+
+	// 冒用他人会话 → 404/40004
+	b := tok(t, mgr, 2)
+	w = doChunk(r, http.MethodPost, "/api/v1/uploads/"+id+"/complete", `{"file_name":"a.txt","parent_id":0}`, b)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("冒用应 404, 得到 %d %s", w.Code, w.Body.String())
+	}
+	if code, _, _ := decodeBody(t, w); code != 40004 {
+		t.Fatalf("code = %d, 期望 40004 %s", code, w.Body.String())
+	}
+
+	// 非法 id → 400/10001
+	w = doChunk(r, http.MethodPost, "/api/v1/uploads/not-uuid/complete", `{"file_name":"a.txt","parent_id":0}`, a)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("坏id应 400, 得到 %d %s", w.Code, w.Body.String())
+	}
+	if code, _, _ := decodeBody(t, w); code != 10001 {
+		t.Fatalf("code = %d, 期望 10001 %s", code, w.Body.String())
 	}
 }

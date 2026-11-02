@@ -65,7 +65,7 @@ func main() {
 	if err := os.MkdirAll(chunkTmp, 0o755); err != nil {
 		panic(err)
 	}
-	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp)
+	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp).WithStorage(st)
 	api.RegisterUploadRoutes(r, handler.NewChunkHandler(chunkSvc), jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)

@@ -2,6 +2,8 @@ package service
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
+	"cloudbox/internal/storage"
 )
 
 func newChunkService(t *testing.T) *ChunkService {
@@ -29,7 +32,12 @@ func newChunkService(t *testing.T) *ChunkService {
 	}
 	db.Create(&model.User{Username: "alice", Email: "alice@c.com", PasswordHash: "h", QuotaBytes: 10737418240})
 	db.Create(&model.User{Username: "bob", Email: "bob@c.com", PasswordHash: "h", QuotaBytes: 100})
-	return NewChunkService(repository.NewFileRepository(db), repository.NewUserRepository(db), repository.NewChunkRepository(db), DefaultMaxFileSize, DefaultMaxChunks).WithTmpDir(t.TempDir())
+	tmp := t.TempDir()
+	st, err := storage.NewLocalStorage(filepath.Join(tmp, "store"))
+	if err != nil {
+		t.Fatalf("建测试存储失败: %v", err)
+	}
+	return NewChunkService(repository.NewFileRepository(db), repository.NewUserRepository(db), repository.NewChunkRepository(db), DefaultMaxFileSize, DefaultMaxChunks).WithTmpDir(filepath.Join(tmp, "chunks")).WithStorage(st)
 }
 
 func TestChunkInitOK(t *testing.T) {
@@ -205,5 +213,167 @@ func TestChunkUploadReject(t *testing.T) {
 	// nil 流
 	if _, err := svc.UploadChunk(1, row.UploadID, 0, nil, 10); !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("nil流应参错, 得到 %v", err)
+	}
+}
+
+// buildCompleteSession 按内容切分并上传全部分片，返回会话与原文
+func buildCompleteSession(t *testing.T, svc *ChunkService, owner uint64, fileName string, content []byte, chunkSize uint64) (*model.UploadChunk, []byte) {
+	t.Helper()
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	total := uint64(len(content))
+	n := uint32((total + chunkSize - 1) / chunkSize)
+	row, err := svc.InitUpload(owner, 0, fileName, hash, total, n, chunkSize)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	for i := uint32(0); i < n; i++ {
+		s, e := uint64(i)*chunkSize, uint64(i+1)*chunkSize
+		if e > total {
+			e = total
+		}
+		part := content[s:e]
+		if _, err := svc.UploadChunk(owner, row.UploadID, i, bytes.NewReader(part), int64(len(part))); err != nil {
+			t.Fatalf("传片 %d 失败: %v", i, err)
+		}
+	}
+	return row, content
+}
+
+func TestChunkCompleteOK(t *testing.T) {
+	svc := newChunkService(t)
+	content := []byte("hello-chunk-merge-world-0123456789-abcdef")
+	row, _ := buildCompleteSession(t, svc, 1, "a.txt", content, 10)
+	f, err := svc.CompleteUpload(1, 0, row.UploadID, "a.txt")
+	if err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
+	if f.FileSize != uint64(len(content)) || f.MimeType == "" || f.IsFolder != 0 {
+		t.Fatalf("落库不对: %+v", f)
+	}
+	sum := sha256.Sum256(content)
+	if f.FileHash != hex.EncodeToString(sum[:]) {
+		t.Fatalf("hash不对: %s", f.FileHash)
+	}
+	// 配额真扣
+	u, _ := svc.users.FindByID(1)
+	if u.UsedBytes != uint64(len(content)) {
+		t.Fatalf("配额未扣: %d", u.UsedBytes)
+	}
+	// 暂存清盘
+	if _, err := os.Stat(filepath.Join(svc.tmpRoot(), row.UploadID)); !os.IsNotExist(err) {
+		t.Fatalf("分片目录应清理: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.tmpRoot(), row.UploadID+".merged")); !os.IsNotExist(err) {
+		t.Fatalf("合并临时应清理: %v", err)
+	}
+	// 重复 complete 幂等：不二次扣配额
+	f2, err := svc.CompleteUpload(1, 0, row.UploadID, "a.txt")
+	if err != nil || f2.ID != f.ID {
+		t.Fatalf("重复合并应幂等: %+v %v", f2, err)
+	}
+	u2, _ := svc.users.FindByID(1)
+	if u2.UsedBytes != u.UsedBytes {
+		t.Fatalf("幂等不应二次扣: %d vs %d", u2.UsedBytes, u.UsedBytes)
+	}
+}
+
+func TestChunkCompleteReject(t *testing.T) {
+	// 缺片
+	svc := newChunkService(t)
+	content := []byte("0123456789abcdefghij0123456789")
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	row, err := svc.InitUpload(1, 0, "a.txt", hash, uint64(len(content)), 3, 10)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	if _, err := svc.UploadChunk(1, row.UploadID, 0, bytes.NewReader(content[:10]), 10); err != nil {
+		t.Fatalf("传片失败: %v", err)
+	}
+	if _, err := svc.CompleteUpload(1, 0, row.UploadID, "a.txt"); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("缺片应参错, 得到 %v", err)
+	}
+	// 会话不存在 / 他人会话
+	if _, err := svc.CompleteUpload(1, 0, "33333333-3333-4333-8333-333333333333", "a.txt"); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("无会话应 404, 得到 %v", err)
+	}
+	svc2 := newChunkService(t)
+	r2, _ := buildCompleteSession(t, svc2, 1, "a.txt", content, 10)
+	_ = r2
+	// 他人会话用另一实例同 uploadID 不存在 → 404（跨实例隔离）
+	if _, err := svc.CompleteUpload(2, 0, row.UploadID, "a.txt"); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("他人会话应 404, 得到 %v", err)
+	}
+	// 非法文件名 / 非法 parent / 非法 id
+	svc3 := newChunkService(t)
+	r3, _ := buildCompleteSession(t, svc3, 1, "a.txt", content, 10)
+	if _, err := svc3.CompleteUpload(1, 0, r3.UploadID, "bad/name.txt"); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("坏名应参错, 得到 %v", err)
+	}
+	if _, err := svc3.CompleteUpload(1, 999999, r3.UploadID, "a.txt"); !errors.Is(err, ErrInvalidParent) && !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("坏parent应 404 系, 得到 %v", err)
+	}
+	if _, err := svc3.CompleteUpload(1, 0, "not-uuid", "a.txt"); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("坏id应参错, 得到 %v", err)
+	}
+	// hash 不一致：声明 A 内容传 B
+	svc4 := newChunkService(t)
+	hashA := strings.Repeat("a", 64)
+	r4, err := svc4.InitUpload(1, 0, "a.txt", hashA, 20, 2, 10)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	for i := uint32(0); i < 2; i++ {
+		if _, err := svc4.UploadChunk(1, r4.UploadID, i, bytes.NewReader([]byte("0123456789")), 10); err != nil {
+			t.Fatalf("传片失败: %v", err)
+		}
+	}
+	if _, err := svc4.CompleteUpload(1, 0, r4.UploadID, "a.txt"); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("hash不一致应参错, 得到 %v", err)
+	}
+	// 三层校验：exe 扩展名 / 改名攻击（文本内容叫 .pdf 应过，pdf 内容叫 .txt 也过，但 exe 必拒）
+	svc5 := newChunkService(t)
+	r5, _ := buildCompleteSession(t, svc5, 1, "a.txt", content, 10)
+	if _, err := svc5.CompleteUpload(1, 0, r5.UploadID, "evil.exe"); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("exe应参错, 得到 %v", err)
+	}
+	// 配额原子扣失败：bob quota=100，先占 80 再合 50 → 30002 系
+	svc6 := newChunkService(t)
+	c50 := bytes.Repeat([]byte("x"), 50)
+	r6, _ := buildCompleteSession(t, svc6, 2, "a.txt", c50, 10)
+	if _, err := svc6.users.IncrUsedBytesIfEnough(2, 80); err != nil {
+		t.Fatalf("预占失败: %v", err)
+	}
+	if _, err := svc6.CompleteUpload(2, 0, r6.UploadID, "a.txt"); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("超配额应 ErrQuotaExceeded, 得到 %v", err)
+	}
+	// 全局 uk_hash 冲突 → ErrFileConflict（他人已存同 hash）
+	svc7 := newChunkService(t)
+	c7 := []byte("conflict-content-0123456789-abcdefghij")
+	sum7 := sha256.Sum256(c7)
+	hash7 := hex.EncodeToString(sum7[:])
+	if err := svc7.files.CreateFile(&model.File{FileName: "other.txt", FileHash: hash7, OwnerID: 2}); err != nil {
+		t.Fatalf("预置冲突行失败: %v", err)
+	}
+	r7, err := svc7.InitUpload(1, 0, "a.txt", hash7, uint64(len(c7)), 4, 10)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	for i := uint32(0); i < 4; i++ {
+		s, e := uint64(i)*10, uint64(i+1)*10
+		if e > uint64(len(c7)) {
+			e = uint64(len(c7))
+		}
+		if _, err := svc7.UploadChunk(1, r7.UploadID, i, bytes.NewReader(c7[s:e]), int64(len(c7[s:e]))); err != nil {
+			t.Fatalf("传片失败: %v", err)
+		}
+	}
+	if _, err := svc7.CompleteUpload(1, 0, r7.UploadID, "a.txt"); !errors.Is(err, ErrFileConflict) {
+		t.Fatalf("uk冲突应 ErrFileConflict, 得到 %v", err)
+	}
+	u7, _ := svc7.users.FindByID(1)
+	if u7.UsedBytes != 0 {
+		t.Fatalf("冲突应回补配额: used=%d", u7.UsedBytes)
 	}
 }

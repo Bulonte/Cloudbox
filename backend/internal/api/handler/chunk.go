@@ -12,6 +12,7 @@ import (
 	"cloudbox/internal/pkg/response"
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
+	"cloudbox/internal/service/upload"
 )
 
 // 上传错误码：30002 配额不足；其余复用 file.go 的 10001/40004/90001
@@ -98,6 +99,21 @@ func (h *ChunkHandler) UploadChunk(c *gin.Context) {
 	response.OK(c, ToUploadChunkResponse(res.UploadID, res.ChunkIndex, res.Size))
 }
 
+// CompleteUpload POST /api/v1/uploads/:id/complete：分片合并收官（响应复用 FileResponse）
+func (h *ChunkHandler) CompleteUpload(c *gin.Context) {
+	var req dto.CompleteUploadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	f, err := h.svc.CompleteUpload(c.GetUint64(middleware.CtxUserID), req.ParentID, c.Param("id"), req.FileName)
+	if err != nil {
+		h.failChunk(c, err)
+		return
+	}
+	response.OK(c, ToFileResponse(f))
+}
+
 // failChunk 分片错误统一映射：参数 400/10001；越权/父非法 404 伪装；配额 400/30002
 func (h *ChunkHandler) failChunk(c *gin.Context, err error) {
 	switch {
@@ -109,10 +125,16 @@ func (h *ChunkHandler) failChunk(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrFileNotFound),
 		errors.Is(err, service.ErrInvalidParent),
 		errors.Is(err, service.ErrChunkNotFound),
+		errors.Is(err, upload.ErrFileNotFound),
+		errors.Is(err, upload.ErrInvalidParent),
 		errors.Is(err, repository.ErrFileNotFound),
 		errors.Is(err, repository.ErrInvalidParent),
 		errors.Is(err, repository.ErrChunkNotFound):
 		response.Fail(c, http.StatusNotFound, codeFileNotFound, "文件不存在")
+	case errors.Is(err, service.ErrFileConflict),
+		errors.Is(err, upload.ErrFileConflict),
+		errors.Is(err, repository.ErrFileConflict):
+		response.Fail(c, http.StatusConflict, codeFileConflict, "同名文件已存在")
 	default:
 		response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
 	}

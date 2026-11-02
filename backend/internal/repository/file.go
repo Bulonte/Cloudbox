@@ -59,6 +59,19 @@ func (r *FileRepository) FindByID(id, ownerID uint64) (*model.File, error) {
 	return &f, nil
 }
 
+// FindByHash 按 hash 查同人正常行；无行返回 nil,nil（幂等短路用），仅 DB 错才返回 error
+func (r *FileRepository) FindByHash(hash string, ownerID uint64) (*model.File, error) {
+	var f model.File
+	err := r.db.Select(fileColumns).Where("file_hash = ? AND owner_id = ? AND is_deleted = 0", hash, ownerID).First(&f).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("按哈希查文件: %w", err)
+	}
+	return &f, nil
+}
+
 // ListByParent 按父目录分页（文件夹置顶）；total 供 S3 分页用
 func (r *FileRepository) ListByParent(ownerID, parentID uint64, offset, limit int) ([]*model.File, int64, error) {
 	if limit < 1 {

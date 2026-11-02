@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
+	"cloudbox/internal/service/upload"
+	"cloudbox/internal/storage"
 )
 
 // ErrQuotaExceeded 配额不足（映射 HTTP 400 / code 30002，只预检不扣减，真扣减在 S3 原子 UPDATE）
@@ -36,10 +39,12 @@ const (
 )
 
 // ChunkService 分片会话业务：编排会话签发与分片落盘；S2 落 .part 暂存，事务为单行 UPSERT
+// S3 合并需 WithStorage + WithTmpDir 双注入（测试/生产 main.go 均显式注入）
 type ChunkService struct {
 	files       *repository.FileRepository
 	users       *repository.UserRepository
 	chunks      *repository.ChunkRepository
+	store       storage.Storage
 	maxFileSize uint64
 	maxChunks   uint32
 	tmpDir      string
@@ -68,6 +73,12 @@ func NewChunkService(files *repository.FileRepository, users *repository.UserRep
 // WithTmpDir 注入分片暂存根（S2 落 .part 用）；空串回退系统临时目录，返回同一实例方便链式调用
 func (s *ChunkService) WithTmpDir(dir string) *ChunkService {
 	s.tmpDir = dir
+	return s
+}
+
+// WithStorage 注入内容寻址存储（S3 合并/秒传复用 Store）；返回同一实例方便链式调用
+func (s *ChunkService) WithStorage(st storage.Storage) *ChunkService {
+	s.store = st
 	return s
 }
 
@@ -273,6 +284,228 @@ func (s *ChunkService) checkQuota(ownerID, totalSize uint64) error {
 		return ErrQuotaExceeded
 	}
 	return nil
+}
+
+// mergedTmpPath 合并临时文件路径：tmpRoot/<uploadID>.merged，前缀双保险同 S2
+func (s *ChunkService) mergedTmpPath(uploadID string) (string, error) {
+	uploadID = strings.TrimSpace(uploadID)
+	abs := filepath.Join(s.tmpRoot(), uploadID+".merged")
+	cleaned := filepath.Clean(abs)
+	root := filepath.Clean(s.tmpRoot())
+	if cleaned != root && !strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: 合并路径非法", ErrInvalidParams)
+	}
+	return cleaned, nil
+}
+
+// cleanupSession 清 .part 暂存目录（成功/Cancel/冲突幂等后调用，失败忽略）
+func (s *ChunkService) cleanupSession(uploadID string) {
+	_ = os.RemoveAll(filepath.Join(s.tmpRoot(), filepath.FromSlash(strings.TrimSpace(uploadID))))
+}
+
+// CompleteUpload 分片合并：会话归属 → parent/幂等 → 齐套/等大/sum → 按序合并+SHA →
+// 三层校验 → Store 复用 → 配额原子扣 → file 落库（冲突回补）→ Cancel + 清盘
+func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileName string) (*model.File, error) {
+	if ownerID == 0 {
+		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidParams)
+	}
+	uploadID = strings.TrimSpace(uploadID)
+	if !validUploadID(uploadID) {
+		return nil, fmt.Errorf("%w: 会话非法", ErrInvalidParams)
+	}
+	if !validFileName(fileName) {
+		return nil, fmt.Errorf("%w: 文件名非法", ErrInvalidParams)
+	}
+	if s.store == nil {
+		return nil, fmt.Errorf("存储未注入")
+	}
+	sess, err := s.chunks.FindSession(uploadID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	canonicalHash := strings.ToLower(strings.TrimSpace(sess.FileHash))
+	n := sess.TotalChunks
+	cs := sess.ChunkSize
+	if err := s.checkParent(ownerID, parentID); err != nil {
+		return nil, err
+	}
+	// 幂等短路：同人同 hash 已有正常行，直接 Cancel + 清盘返回既有行，不二次扣配额
+	// 已取消会话同样走幂等（重复 complete 返回既有行），无行才 404
+	if f, err := s.files.FindByHash(canonicalHash, ownerID); err != nil {
+		return nil, err
+	} else if f != nil {
+		_ = s.chunks.Cancel(uploadID, ownerID)
+		s.cleanupSession(uploadID)
+		return f, nil
+	}
+	if sess.Status == 2 {
+		return nil, ErrChunkNotFound
+	}
+	if err := s.checkParent(ownerID, parentID); err != nil {
+		return nil, err
+	}
+	// 大小写兼容：会话存原串，实际合并比对 EqualFold
+	// 齐套校验：占位行除外须满 n 行
+	rows, err := s.chunks.FindByUploadID(uploadID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	var cnt uint32
+	for _, r := range rows {
+		if r.ChunkIndex == repository.ChunkSessionMarker {
+			continue
+		}
+		cnt++
+	}
+	if cnt != n || n == 0 {
+		return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+	}
+	// 逐片 Stat：缺盘/缺行/中间片不等大/末片越界一律参错
+	var sum uint64
+	for i := uint32(0); i < n; i++ {
+		if _, err := s.chunks.FindChunk(uploadID, ownerID, i); err != nil {
+			return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+		}
+		abs, _, err := s.partAbsPath(uploadID, i)
+		if err != nil {
+			return nil, err
+		}
+		fi, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+		}
+		sz := uint64(fi.Size())
+		if i < n-1 {
+			if sz != cs {
+				return nil, fmt.Errorf("%w: 分片大小不一致", ErrInvalidParams)
+			}
+		} else {
+			if sz == 0 || sz > cs {
+				return nil, fmt.Errorf("%w: 末片大小非法", ErrInvalidParams)
+			}
+		}
+		sum += sz
+	}
+	// sum 区间闭环：(n-1)*cs < sum ≤ n*cs 且 sum ≤ maxFileSize（S1 没存 total_size 的替代约束）
+	if n > 0 {
+		lo := uint64(n-1) * cs
+		if sum <= lo || sum > uint64(n)*cs {
+			return nil, fmt.Errorf("%w: 分片总和非法", ErrInvalidParams)
+		}
+	}
+	if sum == 0 || sum > s.maxFileSize {
+		return nil, fmt.Errorf("%w: 文件大小非法", ErrInvalidParams)
+	}
+	// 按序合并：边读边 hash，全程流式禁 ReadAll
+	merged, err := s.mergedTmpPath(uploadID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := os.OpenFile(merged, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("建合并文件: %w", err)
+	}
+	h := sha256.New()
+	mw := io.MultiWriter(out, h)
+	for i := uint32(0); i < n; i++ {
+		abs, _, err := s.partAbsPath(uploadID, i)
+		if err != nil {
+			_ = out.Close()
+			_ = os.Remove(merged)
+			return nil, err
+		}
+		in, err := os.Open(abs)
+		if err != nil {
+			_ = out.Close()
+			_ = os.Remove(merged)
+			return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+		}
+		if _, err := io.CopyBuffer(mw, in, make([]byte, 32*1024)); err != nil {
+			_ = in.Close()
+			_ = out.Close()
+			_ = os.Remove(merged)
+			return nil, fmt.Errorf("合并分片: %w", err)
+		}
+		_ = in.Close()
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("关闭合并文件: %w", err)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, sess.FileHash) {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("%w: 文件哈希不一致", ErrInvalidParams)
+	}
+	// 三层校验：扩展名 + MIME/魔数（复用 upload 包，与 W4 单文件同口径）
+	ext, err := upload.ValidateExt(fileName)
+	if err != nil {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidParams, err)
+	}
+	head := make([]byte, upload.SniffLen)
+	mf, err := os.Open(merged)
+	if err != nil {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("打开合并文件: %w", err)
+	}
+	hn, _ := io.ReadFull(mf, head)
+	_ = mf.Close()
+	head = head[:hn]
+	mime, err := upload.SniffAndCheck(head, ext)
+	if err != nil {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidParams, err)
+	}
+	// 快拒：读配额做一次只读预检，省 Store 调用
+	if err := s.checkQuota(ownerID, sum); err != nil {
+		_ = os.Remove(merged)
+		return nil, err
+	}
+	mr, err := os.Open(merged)
+	if err != nil {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("打开合并文件: %w", err)
+	}
+	rel, err := s.store.Store(canonicalHash, mr)
+	_ = mr.Close()
+	if err != nil {
+		_ = os.Remove(merged)
+		return nil, fmt.Errorf("落盘失败: %w", err)
+	}
+	ok, err := s.users.IncrUsedBytesIfEnough(ownerID, sum)
+	if err != nil {
+		_ = os.Remove(merged)
+		return nil, err
+	}
+	if !ok {
+		_ = os.Remove(merged)
+		return nil, ErrQuotaExceeded
+	}
+	f := &model.File{
+		FileName: strings.TrimSpace(fileName),
+		FileHash: canonicalHash,
+		FileSize: sum,
+		FilePath: rel,
+		MimeType: mime,
+		ParentID: parentID,
+		OwnerID:  ownerID,
+		IsFolder: 0,
+	}
+	if err := s.files.CreateFile(f); err != nil {
+		// 冲突/其他错一律回补配额；冲突额外 Cancel + 清盘转 S4 秒传
+		_ = s.users.DecrUsedBytes(ownerID, sum)
+		_ = os.Remove(merged)
+		if errors.Is(err, repository.ErrFileConflict) {
+			_ = s.chunks.Cancel(uploadID, ownerID)
+			s.cleanupSession(uploadID)
+			return nil, ErrFileConflict
+		}
+		return nil, err
+	}
+	_ = s.chunks.Cancel(uploadID, ownerID)
+	s.cleanupSession(uploadID)
+	_ = os.Remove(merged)
+	return f, nil
 }
 
 // InitUpload 会话签发主流程：V1–V5 → parent → quota → UUID 落占位行；hash 已存在也照常建会话

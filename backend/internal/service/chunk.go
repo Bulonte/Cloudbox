@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"cloudbox/internal/model"
@@ -32,13 +35,21 @@ const (
 	DefaultMaxChunks = 10000
 )
 
-// ChunkService 分片会话业务：纯编排，无 storage/Redis 调用，事务仅单行 INSERT
+// ChunkService 分片会话业务：编排会话签发与分片落盘；S2 落 .part 暂存，事务为单行 UPSERT
 type ChunkService struct {
 	files       *repository.FileRepository
 	users       *repository.UserRepository
 	chunks      *repository.ChunkRepository
 	maxFileSize uint64
 	maxChunks   uint32
+	tmpDir      string
+}
+
+// ChunkUploadResult 分片上传回显内部载体（Handler 转 DTO，不直接暴露）
+type ChunkUploadResult struct {
+	UploadID   string
+	ChunkIndex uint32
+	Size       uint64
 }
 
 // NewChunkService 构造注入；maxFileSize<=0 回退 5GB，maxChunks<=0 回退 10000
@@ -52,6 +63,134 @@ func NewChunkService(files *repository.FileRepository, users *repository.UserRep
 		mc = uint32(maxChunks)
 	}
 	return &ChunkService{files: files, users: users, chunks: chunks, maxFileSize: mf, maxChunks: mc}
+}
+
+// WithTmpDir 注入分片暂存根（S2 落 .part 用）；空串回退系统临时目录，返回同一实例方便链式调用
+func (s *ChunkService) WithTmpDir(dir string) *ChunkService {
+	s.tmpDir = dir
+	return s
+}
+
+// tmpRoot 分片暂存根；未注入回退系统临时目录（测试/兜底）
+func (s *ChunkService) tmpRoot() string {
+	if strings.TrimSpace(s.tmpDir) != "" {
+		return s.tmpDir
+	}
+	return filepath.Join(os.TempDir(), "cloudbox-chunks")
+}
+
+// validUploadID 36 字符 UUID 形校验（8-4-4-4-12，hex+`-`），防 `../` 路径穿越
+func validUploadID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := id[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// partAbsPath 分片落盘绝对路径：tmpRoot/<uploadID>/<index>.part，先 Clean 再前缀双保险
+func (s *ChunkService) partAbsPath(uploadID string, index uint32) (abs, rel string, err error) {
+	rel = fmt.Sprintf("%s/%d.part", strings.TrimSpace(uploadID), index)
+	abs = filepath.Join(s.tmpRoot(), filepath.FromSlash(rel))
+	cleaned := filepath.Clean(abs)
+	root := filepath.Clean(s.tmpRoot())
+	if cleaned != root && !strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("%w: 分片路径非法", ErrInvalidParams)
+	}
+	return cleaned, rel, nil
+}
+
+// savePart 流式落盘：tmp 写完 Rename 原子生效；CopyN 上限 cs+1，超限删 tmp 并报参错
+func (s *ChunkService) savePart(abs string, chunkSize uint64, src io.Reader) (uint64, error) {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return 0, fmt.Errorf("建分片目录: %w", err)
+	}
+	tmp := fmt.Sprintf("%s.tmp-%d", abs, os.Getpid())
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, fmt.Errorf("建分片临时文件: %w", err)
+	}
+	// 有界拷贝：最多读 cs+1 字节，多 1 字节即判定超限
+	n, err := io.CopyN(f, src, int64(chunkSize)+1)
+	cerr := f.Close()
+	if err != nil && !errors.Is(err, io.EOF) {
+		_ = os.Remove(tmp)
+		return 0, fmt.Errorf("写入分片: %w", err)
+	}
+	if cerr != nil {
+		_ = os.Remove(tmp)
+		return 0, fmt.Errorf("关闭分片文件: %w", cerr)
+	}
+	if n == 0 {
+		_ = os.Remove(tmp)
+		return 0, fmt.Errorf("%w: 分片为空", ErrInvalidParams)
+	}
+	if uint64(n) > chunkSize {
+		_ = os.Remove(tmp)
+		return 0, fmt.Errorf("%w: 分片超限", ErrInvalidParams)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return 0, fmt.Errorf("生效分片文件: %w", err)
+	}
+	return uint64(n), nil
+}
+
+// UploadChunk 单分片上传：会话归属 → 序号/大小校验 → 落盘 → 幂等入库；重传覆盖以最后一次为准
+func (s *ChunkService) UploadChunk(ownerID uint64, uploadID string, index uint32, src io.Reader, size int64) (*ChunkUploadResult, error) {
+	if ownerID == 0 {
+		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidParams)
+	}
+	uploadID = strings.TrimSpace(uploadID)
+	if !validUploadID(uploadID) {
+		return nil, fmt.Errorf("%w: 会话非法", ErrInvalidParams)
+	}
+	if src == nil {
+		return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+	}
+	sess, err := s.chunks.FindSession(uploadID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Status == 2 {
+		// 已取消会话伪装成不存在，不泄露存在性
+		return nil, ErrChunkNotFound
+	}
+	if index >= sess.TotalChunks {
+		return nil, fmt.Errorf("%w: 分片序号越界", ErrInvalidParams)
+	}
+	if size <= 0 || uint64(size) > sess.ChunkSize {
+		return nil, fmt.Errorf("%w: 分片大小非法", ErrInvalidParams)
+	}
+	if uint64(size) > MaxChunkSize {
+		return nil, fmt.Errorf("%w: 分片超限", ErrInvalidParams)
+	}
+	abs, rel, err := s.partAbsPath(uploadID, index)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.savePart(abs, sess.ChunkSize, src)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.chunks.UpsertChunkDone(uploadID, ownerID, index, sess.TotalChunks, sess.ChunkSize, sess.FileHash, rel); err != nil {
+		// DB 失败删刚写 .part，防孤儿
+		_ = os.Remove(abs)
+		return nil, err
+	}
+	return &ChunkUploadResult{UploadID: uploadID, ChunkIndex: index, Size: n}, nil
 }
 
 // validSHA256 hash 规则：64 位 hex，大小写均放行，存原串

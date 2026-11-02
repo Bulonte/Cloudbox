@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,6 +16,9 @@ import (
 
 // 上传错误码：30002 配额不足；其余复用 file.go 的 10001/40004/90001
 const codeQuotaExceeded = 30002
+
+// ChunkBodyLimit 单分片请求体上限：8MB + 1MB 兜底（含 multipart 开销），超限截断后转 400/10001
+const ChunkBodyLimit = service.MaxChunkSize + 1*1024*1024
 
 // ChunkHandler 分片会话 HTTP 层：只做 Bind/错误码映射，不直调仓储
 type ChunkHandler struct {
@@ -37,6 +41,16 @@ func ToInitUploadResponse(uploadID, fileHash string, totalChunks uint32, chunkSi
 	}
 }
 
+// ToUploadChunkResponse 分片上传回显：只含四字段，不含 chunk_path/file_hash
+func ToUploadChunkResponse(uploadID string, index uint32, size uint64) dto.UploadChunkResponse {
+	return dto.UploadChunkResponse{
+		UploadID:   uploadID,
+		ChunkIndex: index,
+		Size:       size,
+		Status:     1,
+	}
+}
+
 // InitUpload POST /api/v1/uploads/init：签发分片会话（hash 已存在也照常建，秒传归 S4）
 func (h *ChunkHandler) InitUpload(c *gin.Context) {
 	var req dto.InitUploadRequest
@@ -50,6 +64,38 @@ func (h *ChunkHandler) InitUpload(c *gin.Context) {
 		return
 	}
 	response.OK(c, ToInitUploadResponse(row.UploadID, row.FileHash, row.TotalChunks, row.ChunkSize, row.Status))
+}
+
+// UploadChunk POST /api/v1/uploads/:id/chunks：接收单个分片，落暂存盘 + 幂等入库
+func (h *ChunkHandler) UploadChunk(c *gin.Context) {
+	uploadID := c.Param("id")
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, ChunkBodyLimit)
+	idx, err := strconv.ParseUint(c.PostForm("chunk_index"), 10, 32)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	fh, err := c.FormFile("chunk")
+	if err != nil || fh == nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	if fh.Size <= 0 {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	f, err := fh.Open()
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	defer func() { _ = f.Close() }()
+	res, err := h.svc.UploadChunk(c.GetUint64(middleware.CtxUserID), uploadID, uint32(idx), f, fh.Size)
+	if err != nil {
+		h.failChunk(c, err)
+		return
+	}
+	response.OK(c, ToUploadChunkResponse(res.UploadID, res.ChunkIndex, res.Size))
 }
 
 // failChunk 分片错误统一映射：参数 400/10001；越权/父非法 404 伪装；配额 400/30002

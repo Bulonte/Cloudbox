@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"cloudbox/internal/api"
@@ -58,7 +60,12 @@ func main() {
 	fh.WithUploader(upload.NewUploadService(fileRepo, st, cfg.Upload.MaxSimpleSize))
 	api.RegisterFileRoutes(r, fh, jwtMgr, checker)
 	// W5-S1：分片会话初始化路由接线（init 只建占位行，不碰 storage/Redis）
-	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks)
+	// W5-S2：分片暂存根 .tmp/chunks，启动建目录失败直接 panic（与 storage 同策略）
+	chunkTmp := filepath.Join(cfg.Storage.LocalDir, ".tmp", "chunks")
+	if err := os.MkdirAll(chunkTmp, 0o755); err != nil {
+		panic(err)
+	}
+	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp)
 	api.RegisterUploadRoutes(r, handler.NewChunkHandler(chunkSvc), jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)

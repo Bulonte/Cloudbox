@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"cloudbox/internal/model"
 )
@@ -81,7 +82,71 @@ func (r *ChunkRepository) ListUploadedIndexes(uploadID string, ownerID uint64) (
 	return idx, nil
 }
 
-// MarkDone 分片行置完成（S2 用，占位）；0 行影响转 ErrChunkNotFound
+// FindChunk 查单分片行（S2 覆盖前可选读，S3 合并校验复用）；无行返回 ErrChunkNotFound
+func (r *ChunkRepository) FindChunk(uploadID string, ownerID uint64, index uint32) (*model.UploadChunk, error) {
+	var row model.UploadChunk
+	err := r.db.Select(chunkColumns).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).First(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrChunkNotFound
+		}
+		return nil, fmt.Errorf("查询分片: %w", err)
+	}
+	return &row, nil
+}
+
+// UpsertChunkDone 分片行幂等置完成；不存在则 INSERT，存在则 UPDATE status=1
+// 归属全程带 owner_id：先按三元组 UPDATE，0 行再 INSERT；INSERT 撞 uk 说明行属他人，转 ErrChunkNotFound 防覆盖
+func (r *ChunkRepository) UpsertChunkDone(uploadID string, ownerID uint64, index uint32, totalChunks uint32, chunkSize uint64, fileHash, chunkPath string) error {
+	res := r.db.Model(&model.UploadChunk{}).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).Updates(map[string]any{
+		"file_hash":    fileHash,
+		"total_chunks": totalChunks,
+		"chunk_size":   chunkSize,
+		"chunk_path":   chunkPath,
+		"status":       1,
+	})
+	if res.Error != nil {
+		return fmt.Errorf("更新分片: %w", res.Error)
+	}
+	if res.RowsAffected == 1 {
+		return nil
+	}
+	row := &model.UploadChunk{
+		UploadID:    uploadID,
+		FileHash:    fileHash,
+		ChunkIndex:  index,
+		TotalChunks: totalChunks,
+		ChunkSize:   chunkSize,
+		ChunkPath:   chunkPath,
+		OwnerID:     ownerID,
+		Status:      1,
+	}
+	if err := r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error; err != nil {
+		if isUniqueViolation(err) {
+			return ErrChunkNotFound
+		}
+		return fmt.Errorf("写入分片: %w", err)
+	}
+	if row.ID == 0 {
+		// DoNothing 生效：行已存在（属他人或并发写入），走归属 UPDATE 兜底
+		res2 := r.db.Model(&model.UploadChunk{}).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).Updates(map[string]any{
+			"file_hash":    fileHash,
+			"total_chunks": totalChunks,
+			"chunk_size":   chunkSize,
+			"chunk_path":   chunkPath,
+			"status":       1,
+		})
+		if res2.Error != nil {
+			return fmt.Errorf("更新分片: %w", res2.Error)
+		}
+		if res2.RowsAffected == 0 {
+			return ErrChunkNotFound
+		}
+	}
+	return nil
+}
+
+// MarkDone 分片行置完成（S1 占位）；0 行影响转 ErrChunkNotFound
 func (r *ChunkRepository) MarkDone(uploadID string, ownerID uint64, index uint32) error {
 	res := r.db.Model(&model.UploadChunk{}).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).Update("status", 1)
 	if res.Error != nil {

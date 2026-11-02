@@ -32,3 +32,31 @@ func TestChunkRepositorySession(t *testing.T) {
 		t.Fatalf("空进度应 [] 非 nil: %v %v", idx, err)
 	}
 }
+
+func TestChunkUpsertDone(t *testing.T) {
+	db := openTestDB(t)
+	repo := NewChunkRepository(db)
+	uid := "22222222-2222-4222-8222-222222222222"
+	hash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	// 幂等插入→重传更新仍单条
+	if err := repo.UpsertChunkDone(uid, 1, 0, 2, 2097152, hash, uid+"/0.part"); err != nil {
+		t.Fatalf("upsert 失败: %v", err)
+	}
+	if err := repo.UpsertChunkDone(uid, 1, 0, 2, 2097152, hash, uid+"/0.part"); err != nil {
+		t.Fatalf("重传应幂等: %v", err)
+	}
+	got, err := repo.FindChunk(uid, 1, 0)
+	if err != nil || got.Status != 1 || got.ChunkPath != uid+"/0.part" {
+		t.Fatalf("查分片不对: %+v %v", got, err)
+	}
+	// 他人查/覆盖一律 ErrChunkNotFound
+	if _, err := repo.FindChunk(uid, 2, 0); err != ErrChunkNotFound {
+		t.Fatalf("他人应 ErrChunkNotFound, 得到 %v", err)
+	}
+	if err := repo.UpsertChunkDone(uid, 2, 0, 2, 2097152, hash, uid+"/0.part"); err != ErrChunkNotFound {
+		t.Fatalf("他人覆盖应 ErrChunkNotFound, 得到 %v", err)
+	}
+	if _, err := repo.FindChunk(uid, 1, 9); err != ErrChunkNotFound {
+		t.Fatalf("缺片应 ErrChunkNotFound, 得到 %v", err)
+	}
+}

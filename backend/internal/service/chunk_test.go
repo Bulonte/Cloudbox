@@ -1,7 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,7 +29,7 @@ func newChunkService(t *testing.T) *ChunkService {
 	}
 	db.Create(&model.User{Username: "alice", Email: "alice@c.com", PasswordHash: "h", QuotaBytes: 10737418240})
 	db.Create(&model.User{Username: "bob", Email: "bob@c.com", PasswordHash: "h", QuotaBytes: 100})
-	return NewChunkService(repository.NewFileRepository(db), repository.NewUserRepository(db), repository.NewChunkRepository(db), DefaultMaxFileSize, DefaultMaxChunks)
+	return NewChunkService(repository.NewFileRepository(db), repository.NewUserRepository(db), repository.NewChunkRepository(db), DefaultMaxFileSize, DefaultMaxChunks).WithTmpDir(t.TempDir())
 }
 
 func TestChunkInitOK(t *testing.T) {
@@ -111,5 +115,95 @@ func TestChunkInitParent(t *testing.T) {
 	}
 	if _, err := svc.InitUpload(2, folder.ID, "a.zip", strings.Repeat("f", 64), 100, 1, 100); !errors.Is(err, ErrInvalidParent) && !errors.Is(err, ErrFileNotFound) {
 		t.Fatalf("挂靠他人夹应 404 系, 得到 %v", err)
+	}
+}
+
+func TestChunkUploadOKAndIdempotent(t *testing.T) {
+	svc := newChunkService(t)
+	hash := strings.Repeat("a", 64)
+	row, err := svc.InitUpload(1, 0, "a.zip", hash, 2*2097152, 2, 2097152)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	// 正常片 0
+	data0 := bytes.Repeat([]byte("x"), 100)
+	res, err := svc.UploadChunk(1, row.UploadID, 0, bytes.NewReader(data0), int64(len(data0)))
+	if err != nil {
+		t.Fatalf("传片0失败: %v", err)
+	}
+	if res.Size != uint64(len(data0)) || res.ChunkIndex != 0 {
+		t.Fatalf("回显不对: %+v", res)
+	}
+	abs := filepath.Join(svc.tmpRoot(), row.UploadID, "0.part")
+	got, err := os.ReadFile(abs)
+	if err != nil || !bytes.Equal(got, data0) {
+		t.Fatalf("落盘不对: %v len=%d", err, len(got))
+	}
+	// 末片小于 cs 放行
+	data1 := bytes.Repeat([]byte("y"), 100)
+	if _, err := svc.UploadChunk(1, row.UploadID, 1, bytes.NewReader(data1), int64(len(data1))); err != nil {
+		t.Fatalf("末片失败: %v", err)
+	}
+	// 同 index 重传覆盖
+	data0b := bytes.Repeat([]byte("z"), 200)
+	if _, err := svc.UploadChunk(1, row.UploadID, 0, bytes.NewReader(data0b), int64(len(data0b))); err != nil {
+		t.Fatalf("重传失败: %v", err)
+	}
+	got, _ = os.ReadFile(abs)
+	if !bytes.Equal(got, data0b) {
+		t.Fatalf("重传未覆盖: len=%d", len(got))
+	}
+	// DB 仍幂等单行
+	idx, err := svc.chunks.ListUploadedIndexes(row.UploadID, 1)
+	if err != nil || len(idx) != 2 {
+		t.Fatalf("进度应2片: %v %v", idx, err)
+	}
+}
+
+func TestChunkUploadReject(t *testing.T) {
+	svc := newChunkService(t)
+	hash := strings.Repeat("b", 64)
+	row, err := svc.InitUpload(1, 0, "a.zip", hash, 2097152, 1, 2097152)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	cases := []struct {
+		name string
+		uid  uint64
+		id   string
+		idx  uint32
+		data []byte
+		size int64
+		want error
+	}{
+		{"零用户", 0, row.UploadID, 0, []byte("x"), 1, ErrInvalidParams},
+		{"坏id", 1, "not-uuid", 0, []byte("x"), 1, ErrInvalidParams},
+		{"穿越id", 1, "../etc/passwd-12345678901234567890", 0, []byte("x"), 1, ErrInvalidParams},
+		{"无会话", 1, "33333333-3333-4333-8333-333333333333", 0, []byte("x"), 1, ErrChunkNotFound},
+		{"他人会话", 2, row.UploadID, 0, []byte("x"), 1, ErrChunkNotFound},
+		{"序号越界", 1, row.UploadID, 1, []byte("x"), 1, ErrInvalidParams},
+		{"序号占位", 1, row.UploadID, repository.ChunkSessionMarker, []byte("x"), 1, ErrInvalidParams},
+		{"空片", 1, row.UploadID, 0, []byte{}, 0, ErrInvalidParams},
+		{"超cs", 1, row.UploadID, 0, bytes.Repeat([]byte("x"), 100), 2097153, ErrInvalidParams},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var src *bytes.Reader
+			if tc.data != nil {
+				src = bytes.NewReader(tc.data)
+			}
+			var r io.Reader
+			if src != nil {
+				r = src
+			}
+			_, err := svc.UploadChunk(tc.uid, tc.id, tc.idx, r, tc.size)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("应 %v, 得到 %v", tc.want, err)
+			}
+		})
+	}
+	// nil 流
+	if _, err := svc.UploadChunk(1, row.UploadID, 0, nil, 10); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("nil流应参错, 得到 %v", err)
 	}
 }

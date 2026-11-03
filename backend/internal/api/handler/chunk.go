@@ -114,10 +114,52 @@ func (h *ChunkHandler) CompleteUpload(c *gin.Context) {
 	response.OK(c, ToFileResponse(f))
 }
 
-// failChunk 分片错误统一映射：参数 400/10001；越权/父非法 404 伪装；配额 400/30002
+// ToProgressResponse 进度内部载体转脱敏 DTO（uploaded/missing 恒为数组，空会话 [] 非 null）
+func ToProgressResponse(r *service.ChunkProgressResult) dto.ProgressResponse {
+	up := r.Uploaded
+	if up == nil {
+		up = []uint32{}
+	}
+	miss := r.Missing
+	if miss == nil {
+		miss = []uint32{}
+	}
+	return dto.ProgressResponse{
+		UploadID:    r.UploadID,
+		FileHash:    r.FileHash,
+		TotalChunks: r.TotalChunks,
+		ChunkSize:   r.ChunkSize,
+		Status:      r.Status,
+		Uploaded:    up,
+		Missing:     miss,
+		Complete:    r.Complete,
+	}
+}
+
+// GetProgress GET /api/v1/uploads/:id/progress：断点续传进度查询（只读，不碰存储/配额）
+func (h *ChunkHandler) GetProgress(c *gin.Context) {
+	res, err := h.svc.GetProgress(c.GetUint64(middleware.CtxUserID), c.Param("id"))
+	if err != nil {
+		h.failChunk(c, err)
+		return
+	}
+	response.OK(c, ToProgressResponse(res))
+}
+
+// CancelUpload POST /api/v1/uploads/:id/cancel：会话取消（幂等，重复取消仍 200）
+func (h *ChunkHandler) CancelUpload(c *gin.Context) {
+	if err := h.svc.CancelUpload(c.GetUint64(middleware.CtxUserID), c.Param("id")); err != nil {
+		h.failChunk(c, err)
+		return
+	}
+	response.OK(c, nil)
+}
+
+// failChunk 分片错误统一映射：参数/合并进行中 400/10001；越权/父非法 404 伪装；配额 400/30002
 func (h *ChunkHandler) failChunk(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrInvalidParams),
+		errors.Is(err, service.ErrMergeInProgress),
 		errors.Is(err, repository.ErrChunkConflict):
 		response.Fail(c, http.StatusBadRequest, codeInvalidParams, err.Error())
 	case errors.Is(err, service.ErrQuotaExceeded):

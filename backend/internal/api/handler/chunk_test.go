@@ -52,6 +52,8 @@ func newChunkRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	r := gin.New()
 	up := r.Group("/api/v1/uploads", middleware.AuthRequired(mgr, &fakeRevoked{}))
 	up.POST("/init", ch.InitUpload)
+	up.GET("/:id/progress", ch.GetProgress)
+	up.POST("/:id/cancel", ch.CancelUpload)
 	up.POST("/:id/chunks", ch.UploadChunk)
 	up.POST("/:id/complete", ch.CompleteUpload)
 	return r, mgr
@@ -307,5 +309,71 @@ func TestChunkCompleteAPI(t *testing.T) {
 	}
 	if code, _, _ := decodeBody(t, w); code != 10001 {
 		t.Fatalf("code = %d, 期望 10001 %s", code, w.Body.String())
+	}
+}
+
+func TestProgressCancelAPI(t *testing.T) {
+	r, mgr := newChunkRouter(t)
+	a := tok(t, mgr, 1)
+	b := tok(t, mgr, 2)
+	id := openUpload(t, r, a)
+
+	// 空进度：uploaded=[] 非 null，missing=[0,1]，complete=false
+	w := doChunk(r, http.MethodGet, "/api/v1/uploads/"+id+"/progress", "", a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("进度应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	_, _, data := decodeBody(t, w)
+	if data["complete"] != false {
+		t.Fatalf("空会话 complete 应 false: %v", data)
+	}
+	up, _ := data["uploaded"].([]any)
+	miss, _ := data["missing"].([]any)
+	if up == nil || len(up) != 0 || len(miss) != 2 {
+		t.Fatalf("空进度不对: %v", data)
+	}
+
+	// 传片 0 后进度
+	if w := postChunk(r, id, "0", []byte("hello-0"), a); w.Code != http.StatusOK {
+		t.Fatalf("传片应 200: %d %s", w.Code, w.Body.String())
+	}
+	w = doChunk(r, http.MethodGet, "/api/v1/uploads/"+id+"/progress", "", a)
+	_, _, data = decodeBody(t, w)
+	miss, _ = data["missing"].([]any)
+	if len(miss) != 1 {
+		t.Fatalf("缺片应剩 1: %v", data)
+	}
+
+	// 他人查 → 404/40004
+	w = doChunk(r, http.MethodGet, "/api/v1/uploads/"+id+"/progress", "", b)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("冒用进度应 404, 得到 %d %s", w.Code, w.Body.String())
+	}
+
+	// 坏 id → 400/10001
+	w = doChunk(r, http.MethodGet, "/api/v1/uploads/not-uuid/progress", "", a)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("坏id应 400, 得到 %d %s", w.Code, w.Body.String())
+	}
+
+	// 取消 → 200；重复取消幂等 200；进度再查 404
+	w = doChunk(r, http.MethodPost, "/api/v1/uploads/"+id+"/cancel", "", a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("取消应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	w = doChunk(r, http.MethodPost, "/api/v1/uploads/"+id+"/cancel", "", a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("重复取消应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	w = doChunk(r, http.MethodGet, "/api/v1/uploads/"+id+"/progress", "", a)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("取消后进度应 404, 得到 %d %s", w.Code, w.Body.String())
+	}
+
+	// 他人取消 → 404（新会话归 a，b 取消）
+	id2 := openUpload(t, r, a)
+	w = doChunk(r, http.MethodPost, "/api/v1/uploads/"+id2+"/cancel", "", b)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("他人取消应 404, 得到 %d %s", w.Code, w.Body.String())
 	}
 }

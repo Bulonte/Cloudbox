@@ -41,10 +41,12 @@ func RegisterAdminRoutes(r *gin.Engine, mgr *jwt.Manager, checker middleware.Rev
 	})
 }
 
-// RegisterUploadRoutes 注册分片上传路由组（W5-S1 会话初始化 + S2 单分片上传 + S3 合并收官，全挂 AuthRequired；细粒度归属由 Service 层判）
+// RegisterUploadRoutes 注册分片上传路由组（W5-S1 会话初始化 + S2 单分片上传 + S3 合并收官 + S5 进度查询/取消，全挂 AuthRequired；细粒度归属由 Service 层判）
 func RegisterUploadRoutes(r *gin.Engine, h *handler.ChunkHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	up := r.Group("/api/v1/uploads", middleware.AuthRequired(mgr, checker))
 	up.POST("/init", h.InitUpload)
+	up.GET("/:id/progress", h.GetProgress)
+	up.POST("/:id/cancel", h.CancelUpload)
 	up.POST("/:id/chunks", h.UploadChunk)
 	up.POST("/:id/complete", h.CompleteUpload)
 }

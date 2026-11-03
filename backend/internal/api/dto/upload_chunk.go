@@ -32,3 +32,16 @@ type CompleteUploadRequest struct {
 	FileName string `json:"file_name"`
 	ParentID uint64 `json:"parent_id"`
 }
+
+// ProgressResponse 断点续传进度回显（S5-5.4）：uploaded 升序，空会话为 []；
+// complete=true 时前端可直调 complete，缺片只补传 missing
+type ProgressResponse struct {
+	UploadID    string   `json:"upload_id"`
+	FileHash    string   `json:"file_hash"`
+	TotalChunks uint32   `json:"total_chunks"`
+	ChunkSize   uint64   `json:"chunk_size"`
+	Status      int8     `json:"status"`
+	Uploaded    []uint32 `json:"uploaded"`
+	Missing     []uint32 `json:"missing"`
+	Complete    bool     `json:"complete"`
+}

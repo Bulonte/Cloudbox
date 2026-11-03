@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -375,5 +377,120 @@ func TestChunkCompleteReject(t *testing.T) {
 	u7, _ := svc7.users.FindByID(1)
 	if u7.UsedBytes != 0 {
 		t.Fatalf("冲突应回补配额: used=%d", u7.UsedBytes)
+	}
+}
+
+// stubHeldLocker 模拟锁被他人持有：Acquire 恒返回 ok=false，转 ErrMergeInProgress
+type stubHeldLocker struct{}
+
+func (stubHeldLocker) AcquireLock(context.Context, string, time.Duration) (string, bool, error) {
+	return "", false, nil
+}
+func (stubHeldLocker) ReleaseLock(context.Context, string, string) (bool, error) { return false, nil }
+
+// stubErrLocker 模拟 Redis 宕机：Acquire 恒返回 error，应降级放行合并成功
+type stubErrLocker struct{ err error }
+
+func (s stubErrLocker) AcquireLock(context.Context, string, time.Duration) (string, bool, error) {
+	return "", false, s.err
+}
+func (stubErrLocker) ReleaseLock(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func TestGetProgress(t *testing.T) {
+	svc := newChunkService(t)
+	row, err := svc.InitUpload(1, 0, "a.zip", strings.Repeat("a", 64), 3*10, 3, 10)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	// 空会话：uploaded=[] 非 nil，missing 全量，complete=false
+	p, err := svc.GetProgress(1, row.UploadID)
+	if err != nil {
+		t.Fatalf("progress 失败: %v", err)
+	}
+	if p.Uploaded == nil || len(p.Uploaded) != 0 || len(p.Missing) != 3 || p.Complete {
+		t.Fatalf("空进度不对: %+v", p)
+	}
+	// 传 0,2 后：uploaded 升序，missing=[1]
+	if _, err := svc.UploadChunk(1, row.UploadID, 2, bytes.NewReader(bytes.Repeat([]byte("y"), 5)), 5); err != nil {
+		t.Fatalf("传片2失败: %v", err)
+	}
+	if _, err := svc.UploadChunk(1, row.UploadID, 0, bytes.NewReader(bytes.Repeat([]byte("x"), 10)), 10); err != nil {
+		t.Fatalf("传片0失败: %v", err)
+	}
+	p, err = svc.GetProgress(1, row.UploadID)
+	if err != nil || len(p.Uploaded) != 2 || p.Uploaded[0] != 0 || p.Uploaded[1] != 2 {
+		t.Fatalf("进度不对: %+v %v", p, err)
+	}
+	if len(p.Missing) != 1 || p.Missing[0] != 1 || p.Complete {
+		t.Fatalf("缺片不对: %+v", p)
+	}
+	// 坏 id / 他人 / 零用户
+	if _, err := svc.GetProgress(1, "not-uuid"); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("坏id应参错, 得到 %v", err)
+	}
+	if _, err := svc.GetProgress(2, row.UploadID); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("他人应 404, 得到 %v", err)
+	}
+	if _, err := svc.GetProgress(0, row.UploadID); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("零用户应参错, 得到 %v", err)
+	}
+}
+
+func TestCancelUpload(t *testing.T) {
+	svc := newChunkService(t)
+	row, err := svc.InitUpload(1, 0, "a.zip", strings.Repeat("a", 64), 2*10, 2, 10)
+	if err != nil {
+		t.Fatalf("init 失败: %v", err)
+	}
+	if _, err := svc.UploadChunk(1, row.UploadID, 0, bytes.NewReader(bytes.Repeat([]byte("x"), 10)), 10); err != nil {
+		t.Fatalf("传片失败: %v", err)
+	}
+	if err := svc.CancelUpload(1, row.UploadID); err != nil {
+		t.Fatalf("取消失败: %v", err)
+	}
+	// status=2，占位行仍可查到底层状态
+	sess, err := svc.chunks.FindSession(row.UploadID, 1)
+	if err != nil || sess.Status != 2 {
+		t.Fatalf("取消后状态不对: %+v %v", sess, err)
+	}
+	// .part 目录清理
+	if _, err := os.Stat(filepath.Join(svc.tmpRoot(), row.UploadID)); !os.IsNotExist(err) {
+		t.Fatalf("分片目录应清理: %v", err)
+	}
+	// 进度查询伪装 404
+	if _, err := svc.GetProgress(1, row.UploadID); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("取消后进度应 404, 得到 %v", err)
+	}
+	// 重复取消幂等 200
+	if err := svc.CancelUpload(1, row.UploadID); err != nil {
+		t.Fatalf("重复取消应幂等: %v", err)
+	}
+	// 他人取消 404
+	if err := svc.CancelUpload(2, row.UploadID); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("他人取消应 404, 得到 %v", err)
+	}
+}
+
+func TestCompleteLock(t *testing.T) {
+	// 锁被占：complete 立得 ErrMergeInProgress，不碰配额不落库
+	svc := newChunkService(t)
+	row, _ := buildCompleteSession(t, svc, 1, "a.txt", []byte("0123456789abcdefghij0123456789"), 10)
+	svc.WithLocker(stubHeldLocker{})
+	if _, err := svc.CompleteUpload(1, 0, row.UploadID, "a.txt"); !errors.Is(err, ErrMergeInProgress) {
+		t.Fatalf("抢锁失败应 ErrMergeInProgress, 得到 %v", err)
+	}
+	u, _ := svc.users.FindByID(1)
+	if u.UsedBytes != 0 {
+		t.Fatalf("抢锁失败不应扣配额: %d", u.UsedBytes)
+	}
+	// 锁降级：Acquire 出错仍合并成功
+	svc2 := newChunkService(t)
+	row2, _ := buildCompleteSession(t, svc2, 1, "a.txt", []byte("0123456789abcdefghij0123456789"), 10)
+	svc2.WithLocker(stubErrLocker{err: errors.New("redis down")})
+	f, err := svc2.CompleteUpload(1, 0, row2.UploadID, "a.txt")
+	if err != nil || f.FileSize != 30 {
+		t.Fatalf("降级应合并成功: %+v %v", f, err)
 	}
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +10,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
@@ -26,6 +29,19 @@ var ErrChunkConflict = repository.ErrChunkConflict
 // ErrChunkNotFound 分片会话不存在，复用仓储层哨兵（含越权伪装）
 var ErrChunkNotFound = repository.ErrChunkNotFound
 
+// ErrMergeInProgress 合并进行中（同会话并发 complete 抢锁失败，前端轮询 progress 重试）
+var ErrMergeInProgress = errors.New("合并进行中，请稍后重试")
+
+// MergeLocker 合并互斥抽象：生产传 *redis.Client（同名同参直接满足），测试传 stub；
+// nil 表无锁模式（单测默认），Acquire 出错时降级放行仍靠 DB 原子兜底
+type MergeLocker interface {
+	AcquireLock(ctx context.Context, key string, ttl time.Duration) (string, bool, error)
+	ReleaseLock(ctx context.Context, key, token string) (bool, error)
+}
+
+// mergeLockTTL 同会话合并锁过期：30s 防崩溃残留，合并本身秒级完成
+const mergeLockTTL = 30 * time.Second
+
 // 分片会话参数上限（PRD §2.1 冻结 + 规范 §5.3.3，集中命名常量禁魔法数字）
 const (
 	// DefaultChunkSize 默认分片大小 2MB（推进计划 5.1 口径，可配项提示用）
@@ -40,14 +56,28 @@ const (
 
 // ChunkService 分片会话业务：编排会话签发与分片落盘；S2 落 .part 暂存，事务为单行 UPSERT
 // S3 合并需 WithStorage + WithTmpDir 双注入（测试/生产 main.go 均显式注入）
+// S5 追加 WithLocker（合并互斥，nil 即无锁模式）
 type ChunkService struct {
 	files       *repository.FileRepository
 	users       *repository.UserRepository
 	chunks      *repository.ChunkRepository
 	store       storage.Storage
+	locker      MergeLocker
 	maxFileSize uint64
 	maxChunks   uint32
 	tmpDir      string
+}
+
+// ChunkProgressResult 断点续传进度内部载体（Handler 转 DTO）
+type ChunkProgressResult struct {
+	UploadID    string
+	FileHash    string
+	TotalChunks uint32
+	ChunkSize   uint64
+	Status      int8
+	Uploaded    []uint32
+	Missing     []uint32
+	Complete    bool
 }
 
 // ChunkUploadResult 分片上传回显内部载体（Handler 转 DTO，不直接暴露）
@@ -80,6 +110,106 @@ func (s *ChunkService) WithTmpDir(dir string) *ChunkService {
 func (s *ChunkService) WithStorage(st storage.Storage) *ChunkService {
 	s.store = st
 	return s
+}
+
+// WithLocker 注入合并互斥锁（S5 生产传 *redis.Client；nil 即无锁模式，单测默认）
+func (s *ChunkService) WithLocker(l MergeLocker) *ChunkService {
+	s.locker = l
+	return s
+}
+
+// mergeLockKey 同会话合并锁键；uploadID 已归一化 trim，key 限定单会话互斥
+func mergeLockKey(uploadID string) string {
+	return "chunk:merge:" + strings.TrimSpace(uploadID)
+}
+
+// acquireMerge 抢合并锁：nil 锁直接放行（空释放）；Acquire 出错（Redis 宕）降级放行，
+// 仍靠 IncrIfEnough + uk_hash 兜底正确性；拿锁失败（他人持有）转 ErrMergeInProgress
+func (s *ChunkService) acquireMerge(uploadID string) (release func(), err error) {
+	noop := func() {}
+	if s.locker == nil {
+		return noop, nil
+	}
+	key := mergeLockKey(uploadID)
+	token, ok, lerr := s.locker.AcquireLock(context.Background(), key, mergeLockTTL)
+	if lerr != nil {
+		return noop, nil
+	}
+	if !ok {
+		return nil, ErrMergeInProgress
+	}
+	return func() { _, _ = s.locker.ReleaseLock(context.Background(), key, token) }, nil
+}
+
+// GetProgress 断点续传进度查询（只读：两次索引查询，不碰存储/配额）：
+// 已取消会话伪装 404；uploaded 升序，空会话 [] 非 nil；missing 为 [0,n) 差集
+func (s *ChunkService) GetProgress(ownerID uint64, uploadID string) (*ChunkProgressResult, error) {
+	if ownerID == 0 {
+		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidParams)
+	}
+	uploadID = strings.TrimSpace(uploadID)
+	if !validUploadID(uploadID) {
+		return nil, fmt.Errorf("%w: 会话非法", ErrInvalidParams)
+	}
+	sess, err := s.chunks.FindSession(uploadID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Status == 2 {
+		return nil, ErrChunkNotFound
+	}
+	idx, err := s.chunks.ListUploadedIndexes(uploadID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(idx, func(i, j int) bool { return idx[i] < idx[j] })
+	n := sess.TotalChunks
+	in := make(map[uint32]bool, len(idx))
+	for _, v := range idx {
+		in[v] = true
+	}
+	missing := make([]uint32, 0, n)
+	for i := uint32(0); i < n; i++ {
+		if !in[i] {
+			missing = append(missing, i)
+		}
+	}
+	if idx == nil {
+		idx = []uint32{}
+	}
+	return &ChunkProgressResult{
+		UploadID:    uploadID,
+		FileHash:    sess.FileHash,
+		TotalChunks: n,
+		ChunkSize:   sess.ChunkSize,
+		Status:      sess.Status,
+		Uploaded:    idx,
+		Missing:     missing,
+		Complete:    len(missing) == 0 && n > 0,
+	}, nil
+}
+
+// CancelUpload 会话取消（幂等：重复取消仍 200）：Cancel 置 status=2 + 清 .part 目录和 .merged；
+// 不删 storage、不动配额（配额真扣只在 complete 成功时发生）；他人/不存在 404 伪装
+func (s *ChunkService) CancelUpload(ownerID uint64, uploadID string) error {
+	if ownerID == 0 {
+		return fmt.Errorf("%w: 用户非法", ErrInvalidParams)
+	}
+	uploadID = strings.TrimSpace(uploadID)
+	if !validUploadID(uploadID) {
+		return fmt.Errorf("%w: 会话非法", ErrInvalidParams)
+	}
+	if _, err := s.chunks.FindSession(uploadID, ownerID); err != nil {
+		return err
+	}
+	if err := s.chunks.Cancel(uploadID, ownerID); err != nil {
+		return err
+	}
+	s.cleanupSession(uploadID)
+	if merged, err := s.mergedTmpPath(uploadID); err == nil {
+		_ = os.Remove(merged)
+	}
+	return nil
 }
 
 // tmpRoot 分片暂存根；未注入回退系统临时目录（测试/兜底）
@@ -303,8 +433,8 @@ func (s *ChunkService) cleanupSession(uploadID string) {
 	_ = os.RemoveAll(filepath.Join(s.tmpRoot(), filepath.FromSlash(strings.TrimSpace(uploadID))))
 }
 
-// CompleteUpload 分片合并：会话归属 → parent/幂等 → 齐套/等大/sum → 按序合并+SHA →
-// 三层校验 → Store 复用 → 配额原子扣 → file 落库（冲突回补）→ Cancel + 清盘
+// CompleteUpload 分片合并：抢锁 → 会话归属 → parent/幂等 → 齐套/等大/sum → 按序合并+SHA →
+// 三层校验 → Store 复用 → 配额原子扣 → file 落库（冲突回补）→ Cancel + 清盘；拿锁失败转 ErrMergeInProgress
 func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileName string) (*model.File, error) {
 	if ownerID == 0 {
 		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidParams)
@@ -319,6 +449,12 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 	if s.store == nil {
 		return nil, fmt.Errorf("存储未注入")
 	}
+	// S5 合并互斥：同 uploadID 串行化，防双扣双合；Redis 宕降级放行靠 DB 兜底
+	release, err := s.acquireMerge(uploadID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	sess, err := s.chunks.FindSession(uploadID, ownerID)
 	if err != nil {
 		return nil, err
@@ -340,9 +476,6 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 	}
 	if sess.Status == 2 {
 		return nil, ErrChunkNotFound
-	}
-	if err := s.checkParent(ownerID, parentID); err != nil {
-		return nil, err
 	}
 	// 大小写兼容：会话存原串，实际合并比对 EqualFold
 	// 齐套校验：占位行除外须满 n 行

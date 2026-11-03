@@ -19,6 +19,7 @@ import (
 )
 
 // 文件错误码：10001 参数错；20002 认证失败；40004 文件不存在（含越权伪装）；40006 同名已存在；90001 服务器内部错误
+// （30002 配额不足定义在 chunk.go，同一 handler 包共用）
 const (
 	codeFileNotFound = 40004
 	codeFileConflict = 40006
@@ -249,9 +250,12 @@ func (h *FileHandler) ListFiles(c *gin.Context) {
 	response.OK(c, dto.FileListResponse{Total: total, Page: page, PageSize: pageSize, Items: items})
 }
 
-// failFile 文件错误统一映射：越权/已删/父夹非法一律 404 伪装；上传三层校验一律 400/10001
+// failFile 文件错误统一映射：越权/已删/父夹非法一律 404 伪装；上传三层校验一律 400/10001；配额 400/30002
 func (h *FileHandler) failFile(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, service.ErrQuotaExceeded),
+		errors.Is(err, upload.ErrQuotaExceeded):
+		response.Fail(c, http.StatusBadRequest, codeQuotaExceeded, err.Error())
 	case errors.Is(err, service.ErrInvalidParams),
 		errors.Is(err, service.ErrNotDownloadable),
 		errors.Is(err, upload.ErrTooLarge),

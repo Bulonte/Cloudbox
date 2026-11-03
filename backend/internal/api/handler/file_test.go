@@ -38,21 +38,21 @@ func newFileRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	if err := db.AutoMigrate(&model.User{}, &model.File{}); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
-	// 预置两用户：uid1=alice, uid2=bob
-	db.Create(&model.User{Username: "alice", Email: "alice@f.com", PasswordHash: "h"})
-	db.Create(&model.User{Username: "bob", Email: "bob@f.com", PasswordHash: "h"})
+	// 预置两用户：uid1=alice, uid2=bob（S5 配额闭环：显式给足配额，防 sqlite 默认 0 误拒）
+	db.Create(&model.User{Username: "alice", Email: "alice@f.com", PasswordHash: "h", QuotaBytes: 10737418240})
+	db.Create(&model.User{Username: "bob", Email: "bob@f.com", PasswordHash: "h", QuotaBytes: 10737418240})
 	mgr, err := jwt.NewManager(fileTestSecret, "cloudbox", 2*time.Hour, 168*time.Hour)
 	if err != nil {
 		t.Fatalf("NewManager 失败: %v", err)
 	}
 	fileRepo := repository.NewFileRepository(db)
-	// 测试存储与上传/下载接线（S6/S7）
+	// 测试存储与上传/下载接线（S6/S7）；S5 配额闭环需注入用户仓储
 	st, err := storage.NewLocalStorage(t.TempDir())
 	if err != nil {
 		t.Fatalf("建测试存储失败: %v", err)
 	}
 	fh := handler.NewFileHandler(service.NewFileService(fileRepo).WithStorage(st))
-	fh.WithUploader(upload.NewUploadService(fileRepo, st, upload.MaxSimpleUploadSize))
+	fh.WithUploader(upload.NewUploadService(fileRepo, st, upload.MaxSimpleUploadSize).WithUsers(repository.NewUserRepository(db)))
 	r := gin.New()
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, &fakeRevoked{}))
 	files.GET("", fh.ListFiles)

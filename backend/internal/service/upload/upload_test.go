@@ -32,7 +32,37 @@ func newUploadService(t *testing.T) *UploadService {
 	if err != nil {
 		t.Fatalf("建存储失败: %v", err)
 	}
-	return NewUploadService(repository.NewFileRepository(db), st, MaxSimpleUploadSize)
+	ur := repository.NewUserRepository(db)
+	db.Create(&model.User{Username: "alice", Email: "alice@f.com", PasswordHash: "h", QuotaBytes: 10737418240})
+	db.Create(&model.User{Username: "bob", Email: "bob@f.com", PasswordHash: "h", QuotaBytes: 10737418240})
+	s := NewUploadService(repository.NewFileRepository(db), st, MaxSimpleUploadSize)
+	return s.WithUsers(ur)
+}
+
+// newQuotaService 配额专用：建 quota 指定用户，返回服务与用户 id
+func newQuotaService(t *testing.T, quota uint64) (*UploadService, *repository.UserRepository, uint64) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		t.Fatalf("open sqlite memory: %v", err)
+	}
+	if err := db.AutoMigrate(&model.User{}, &model.File{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+	st, err := storage.NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("建存储失败: %v", err)
+	}
+	ur := repository.NewUserRepository(db)
+	db.Create(&model.User{Username: "q", Email: "q@f.com", PasswordHash: "h", QuotaBytes: quota})
+	u, err := ur.FindByUsername("q")
+	if err != nil {
+		t.Fatalf("查配额用户失败: %v", err)
+	}
+	s := NewUploadService(repository.NewFileRepository(db), st, MaxSimpleUploadSize).WithUsers(ur)
+	return s, ur, u.ID
 }
 
 func TestUploadOK(t *testing.T) {
@@ -220,5 +250,35 @@ func TestUploadLongChineseFileName(t *testing.T) {
 	tooLong := strings.Repeat("测", 252) + ".pdf"
 	if validFileName(tooLong) {
 		t.Fatalf("256 rune 应拒")
+	}
+}
+
+func TestUploadQuota(t *testing.T) {
+	// quota=100：pdfHead 15B 成功扣 15；再传 90B（15+90=105 超额）→ ErrQuotaExceeded 且 used 不变
+	s, ur, uid := newQuotaService(t, 100)
+	f, err := s.Upload(uid, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
+		t.Fatalf("首次应成功: %v", err)
+	}
+	if f.FileSize != uint64(len(pdfHead)) {
+		t.Fatalf("大小不对: %d", f.FileSize)
+	}
+	u, _ := ur.FindByID(uid)
+	if u.UsedBytes != uint64(len(pdfHead)) {
+		t.Fatalf("配额应扣 %d, 得到 %d", len(pdfHead), u.UsedBytes)
+	}
+	// 90 字节内容：pdf 头 + 填充至 90，保证三层校验过
+	big := append(append([]byte{}, pdfHead...), bytes.Repeat([]byte("x"), 90-len(pdfHead))...)
+	if _, err := s.Upload(uid, 0, "b.pdf", bytes.NewReader(big), int64(len(big))); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("超额应 ErrQuotaExceeded, 得到 %v", err)
+	}
+	u2, _ := ur.FindByID(uid)
+	if u2.UsedBytes != u.UsedBytes {
+		t.Fatalf("超额不应扣: %d vs %d", u2.UsedBytes, u.UsedBytes)
+	}
+	// 声明 size 谎报：实际 15 但声明 10，仍按 actual 卡（quota=10 时 15 应拒）
+	s2, _, uid2 := newQuotaService(t, 10)
+	if _, err := s2.Upload(uid2, 0, "a.pdf", bytes.NewReader(pdfHead), 10); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("actual超额应拒, 得到 %v", err)
 	}
 }

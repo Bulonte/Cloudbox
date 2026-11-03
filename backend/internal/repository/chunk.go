@@ -96,7 +96,10 @@ func (r *ChunkRepository) FindChunk(uploadID string, ownerID uint64, index uint3
 }
 
 // UpsertChunkDone 分片行幂等置完成；不存在则 INSERT，存在则 UPDATE status=1
-// 归属全程带 owner_id：先按三元组 UPDATE，0 行再 INSERT；INSERT 撞 uk 说明行属他人，转 ErrChunkNotFound 防覆盖
+// 归属全程带 owner_id：先按三元组 UPDATE，命中直接返回；0 行再 INSERT；INSERT 撞 uk
+// 说明行属他人，转 ErrChunkNotFound 防覆盖。
+// MySQL 默认非 clientFoundRows 时“值完全相同”UPDATE 报 0 行，不能以 RowsAffected==0
+// 判不存在：DoNothing 后 ID==0 时必须 SELECT 确认归属，避免重传误报 404。
 func (r *ChunkRepository) UpsertChunkDone(uploadID string, ownerID uint64, index uint32, totalChunks uint32, chunkSize uint64, fileHash, chunkPath string) error {
 	res := r.db.Model(&model.UploadChunk{}).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).Updates(map[string]any{
 		"file_hash":    fileHash,
@@ -108,7 +111,7 @@ func (r *ChunkRepository) UpsertChunkDone(uploadID string, ownerID uint64, index
 	if res.Error != nil {
 		return fmt.Errorf("更新分片: %w", res.Error)
 	}
-	if res.RowsAffected == 1 {
+	if res.RowsAffected >= 1 {
 		return nil
 	}
 	row := &model.UploadChunk{
@@ -127,21 +130,20 @@ func (r *ChunkRepository) UpsertChunkDone(uploadID string, ownerID uint64, index
 		}
 		return fmt.Errorf("写入分片: %w", err)
 	}
-	if row.ID == 0 {
-		// DoNothing 生效：行已存在（属他人或并发写入），走归属 UPDATE 兜底
-		res2 := r.db.Model(&model.UploadChunk{}).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).Updates(map[string]any{
-			"file_hash":    fileHash,
-			"total_chunks": totalChunks,
-			"chunk_size":   chunkSize,
-			"chunk_path":   chunkPath,
-			"status":       1,
-		})
-		if res2.Error != nil {
-			return fmt.Errorf("更新分片: %w", res2.Error)
-		}
-		if res2.RowsAffected == 0 {
+	if row.ID != 0 {
+		return nil
+	}
+	// DoNothing 生效：可能是本人重传（值相同致 UPDATE 0 行），也可能是他人行冲突。
+	// 以带归属 SELECT 为准，不再用第二次 UPDATE 的 RowsAffected 判定（MySQL 同值仍 0 行）。
+	if _, err := r.FindChunk(uploadID, ownerID, index); err != nil {
+		if errors.Is(err, ErrChunkNotFound) {
 			return ErrChunkNotFound
 		}
+		return err
+	}
+	// 本人行已存在：补一次 status=1（忽略影响行数，MySQL 同值 0 行亦视为成功）。
+	if err := r.db.Model(&model.UploadChunk{}).Where("upload_id = ? AND owner_id = ? AND chunk_index = ?", uploadID, ownerID, index).Update("status", 1).Error; err != nil {
+		return fmt.Errorf("更新分片: %w", err)
 	}
 	return nil
 }

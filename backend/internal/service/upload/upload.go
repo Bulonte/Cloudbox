@@ -177,10 +177,6 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 	if err := ValidateSize(int64(len(data)), limit); err != nil {
 		return nil, err
 	}
-	// S5 配额闭环：声明 size 预检已过，此处按实测 actual 再卡一次（client 可能谎报 size）
-	if err := s.checkQuota(ownerID, uint64(len(data))); err != nil {
-		return nil, err
-	}
 	headLen := len(data)
 	if headLen > SniffLen {
 		headLen = SniffLen
@@ -191,11 +187,16 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 	}
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
-	// S4 被动秒传：本人已有同 hash 直接返回既有行（不写存储不落库，uk 冲突前短路）
+	// S4 被动秒传：本人已有同 hash 直接返回既有行（0 字节净增，不写存储不落库）。
+	// 必须先于配额预检：配额已满时重传已有文件仍应秒传成功，否则永远走不到短路。
 	if existing, err := s.files.FindByHash(hash, ownerID); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return existing, nil
+	}
+	// S5 配额闭环：声明 size 预检已过，此处按实测 actual 再卡一次（client 可能谎报 size）
+	if err := s.checkQuota(ownerID, uint64(len(data))); err != nil {
+		return nil, err
 	}
 	rel, err := s.store.Store(hash, bytes.NewReader(data))
 	if err != nil {

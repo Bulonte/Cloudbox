@@ -39,8 +39,9 @@ type MergeLocker interface {
 	ReleaseLock(ctx context.Context, key, token string) (bool, error)
 }
 
-// mergeLockTTL 同会话合并锁过期：30s 防崩溃残留，合并本身秒级完成
-const mergeLockTTL = 30 * time.Second
+// mergeLockTTL 同会话合并锁过期：10min 覆盖 5GB 大文件合并（读盘+SHA 常超 30s），
+// 防锁先过期致双 complete 交错写坏同一 .merged；合并仍以 O_EXCL 互斥兜底
+const mergeLockTTL = 10 * time.Minute
 
 // 分片会话参数上限（PRD §2.1 冻结 + 规范 §5.3.3，集中命名常量禁魔法数字）
 const (
@@ -535,13 +536,16 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 	if sum == 0 || sum > s.maxFileSize {
 		return nil, fmt.Errorf("%w: 文件大小非法", ErrInvalidParams)
 	}
-	// 按序合并：边读边 hash，全程流式禁 ReadAll
+	// 按序合并：边读边 hash，全程流式禁 ReadAll；O_EXCL 防锁过期后双 complete 交错 O_TRUNC 写坏同一 .merged
 	merged, err := s.mergedTmpPath(uploadID)
 	if err != nil {
 		return nil, err
 	}
-	out, err := os.OpenFile(merged, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	out, err := os.OpenFile(merged, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
+		if os.IsExist(err) {
+			return nil, ErrMergeInProgress
+		}
 		return nil, fmt.Errorf("建合并文件: %w", err)
 	}
 	h := sha256.New()

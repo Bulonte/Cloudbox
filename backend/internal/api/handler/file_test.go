@@ -57,6 +57,7 @@ func newFileRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, &fakeRevoked{}))
 	files.GET("", fh.ListFiles)
 	files.POST("", fh.UploadFile)
+	files.POST("/instant-check", fh.InstantCheck)
 	files.POST("/folders", fh.CreateFolder)
 	files.GET("/:id/download", fh.DownloadFile)
 	files.PUT("/:id", fh.UpdateFile)

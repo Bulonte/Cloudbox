@@ -3,6 +3,8 @@ package upload
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -134,12 +136,73 @@ func TestUploadParent(t *testing.T) {
 
 func TestUploadDuplicateHash(t *testing.T) {
 	s := newUploadService(t)
-	if _, err := s.Upload(1, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); err != nil {
+	first, err := s.Upload(1, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
 		t.Fatalf("首次失败: %v", err)
 	}
-	// 同内容二次传：uk_hash 全局唯一 → ErrFileConflict（W5 转被动秒传前按 409 闭合）
-	if _, err := s.Upload(1, 0, "b.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); !errors.Is(err, ErrFileConflict) {
-		t.Fatalf("二次同 hash 应 ErrFileConflict, 得到 %v", err)
+	// S4 被动秒传：本人同内容二次传直接返回既有行，不再报 409
+	second, err := s.Upload(1, 0, "b.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
+		t.Fatalf("二次应被动秒传直返, 得到 %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("被动秒传应同 id: %d vs %d", second.ID, first.ID)
+	}
+	// 跨用户同 hash：uk_hash 全局唯一仍报冲突（降级口径，前端凭 instant-check exists_global 提示跳过）
+	if _, err := s.Upload(2, 0, "c.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); !errors.Is(err, ErrFileConflict) {
+		t.Fatalf("跨用户同 hash 应 ErrFileConflict, 得到 %v", err)
+	}
+}
+
+func TestInstantCheck(t *testing.T) {
+	s := newUploadService(t)
+	sum := sha256.Sum256(pdfHead)
+	hash := hex.EncodeToString(sum[:])
+	// 全 miss
+	res, err := s.InstantCheck(1, 0, "a.pdf", hash)
+	if err != nil || res.Hit || res.ExistsGlobal || res.File != nil {
+		t.Fatalf("全新应双 false: %+v %v", res, err)
+	}
+	// 非法 hash/文件名/用户
+	if _, err := s.InstantCheck(1, 0, "a.pdf", "zzz"); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("坏hash应 ErrInvalidName, 得到 %v", err)
+	}
+	if _, err := s.InstantCheck(1, 0, "   ", hash); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("空名应 ErrInvalidName, 得到 %v", err)
+	}
+	if _, err := s.InstantCheck(0, 0, "a.pdf", hash); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("零用户应 ErrInvalidName, 得到 %v", err)
+	}
+	// 坏 parent → 404 系
+	if _, err := s.InstantCheck(1, 999999, "a.pdf", hash); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("坏parent应 ErrFileNotFound, 得到 %v", err)
+	}
+	// 上传后本人命中
+	f, err := s.Upload(1, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
+		t.Fatalf("上传失败: %v", err)
+	}
+	res, err = s.InstantCheck(1, 0, "a.pdf", hash)
+	if err != nil || !res.Hit || res.File == nil || res.File.ID != f.ID {
+		t.Fatalf("本人应命中: %+v %v", res, err)
+	}
+	// 大小写兼容
+	res, err = s.InstantCheck(1, 0, "a.pdf", strings.ToUpper(hash))
+	if err != nil || !res.Hit {
+		t.Fatalf("大写hash应命中: %+v %v", res, err)
+	}
+	// 他人全局命中（uk 全局唯一，实传仍 409，前端凭此提示跳过）
+	res, err = s.InstantCheck(2, 0, "b.pdf", hash)
+	if err != nil || res.Hit || !res.ExistsGlobal || res.File != nil {
+		t.Fatalf("他人应 exists_global: %+v %v", res, err)
+	}
+	// 孤儿引用（盘删了）当 miss
+	if err := s.store.Delete(f.FilePath); err != nil {
+		t.Fatalf("删盘失败: %v", err)
+	}
+	res, err = s.InstantCheck(2, 0, "b.pdf", hash)
+	if err != nil || res.Hit || res.ExistsGlobal {
+		t.Fatalf("孤儿应 miss: %+v %v", res, err)
 	}
 }
 

@@ -24,8 +24,61 @@ var ErrFileNotFound = repository.ErrFileNotFound
 // ErrInvalidParent 父目录非法，复用仓储层哨兵
 var ErrInvalidParent = repository.ErrInvalidParent
 
-// ErrFileConflict 同 hash 已存在（uk_hash），复用仓储层哨兵（W5 转被动秒传前按 409 闭合）
+// ErrFileConflict 同 hash 已存在（uk_hash 全局唯一，S4 后本人重复走被动秒传直返，跨用户仍按 409 闭合）
 var ErrFileConflict = repository.ErrFileConflict
+
+// InstantResult 秒传预检结果：Hit=true 表本人已有（秒传成功，File 为既有行）；
+// Hit=false + ExistsGlobal=true 表他人已存（全局提示，前端可跳过上传，实传仍 409）；
+// 全 miss 时 File=nil 双 false，前端走正常上传
+type InstantResult struct {
+	File         *model.File
+	Hit          bool
+	ExistsGlobal bool
+}
+
+// validSHA256 hash 规则：64 位 hex，大小写均放行（与 chunk 会话口径一致）
+func validSHA256(h string) bool {
+	if len(h) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimSpace(h))
+	return err == nil
+}
+
+// InstantCheck 秒传预检（只读+存储存在性双判，不写 DB 不碰配额，<1s）：
+// 本人命中直返；他人命中置 ExistsGlobal（孤儿引用即盘无对象时当 miss）；全 miss 双 false
+func (s *UploadService) InstantCheck(ownerID, parentID uint64, fileName, fileHash string) (*InstantResult, error) {
+	if ownerID == 0 {
+		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidName)
+	}
+	if !validFileName(fileName) {
+		return nil, ErrInvalidName
+	}
+	if !validSHA256(strings.TrimSpace(fileHash)) {
+		return nil, ErrInvalidName
+	}
+	if err := s.checkParent(ownerID, parentID); err != nil {
+		return nil, err
+	}
+	canonical := strings.ToLower(strings.TrimSpace(fileHash))
+	if f, err := s.files.FindByHash(canonical, ownerID); err != nil {
+		return nil, err
+	} else if f != nil {
+		return &InstantResult{File: f, Hit: true}, nil
+	}
+	any, err := s.files.FindAnyByHash(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if any == nil {
+		return &InstantResult{Hit: false}, nil
+	}
+	// 他人已存：存储对象在才算全局命中，盘丢了当 miss 让前端正常上传重建
+	if _, ok := s.store.Exists(canonical); ok {
+		return &InstantResult{Hit: false, ExistsGlobal: true}, nil
+	}
+	return &InstantResult{Hit: false}, nil
+}
 
 // UploadService 单文件上传编排：S5 校验 → SHA256 → S4 落盘 → S1 落库
 type UploadService struct {
@@ -103,6 +156,12 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 	}
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
+	// S4 被动秒传：本人已有同 hash 直接返回既有行（不写存储不落库，uk 冲突前短路）
+	if existing, err := s.files.FindByHash(hash, ownerID); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, nil
+	}
 	rel, err := s.store.Store(hash, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("落盘失败: %w", err)
@@ -118,6 +177,12 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 		IsFolder: 0,
 	}
 	if err := s.files.CreateFile(f); err != nil {
+		// uk 全局唯一：并发自抢/他人已存均转冲突语义；自抢时回查命中则转秒传直返，他人仍 409
+		if errors.Is(err, ErrFileConflict) {
+			if existing, rerr := s.files.FindByHash(hash, ownerID); rerr == nil && existing != nil {
+				return existing, nil
+			}
+		}
 		return nil, err
 	}
 	return f, nil

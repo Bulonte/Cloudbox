@@ -39,3 +39,18 @@ type FileListResponse struct {
 	PageSize int            `json:"page_size"`
 	Items    []FileResponse `json:"items"`
 }
+
+// InstantCheckRequest 秒传预检请求体（S4：上传前 SHA256 查询，不碰存储字节流）
+type InstantCheckRequest struct {
+	FileName string `json:"file_name"`
+	ParentID uint64 `json:"parent_id"`
+	FileHash string `json:"file_hash"`
+}
+
+// InstantCheckResponse 秒传预检回显：hit=true 本人已有秒传成功；
+// hit=false + exists_global=true 他人已存（uk 全局唯一，实传仍 409，前端可提示跳过）
+type InstantCheckResponse struct {
+	Hit          bool          `json:"hit"`
+	ExistsGlobal bool          `json:"exists_global,omitempty"`
+	File         *FileResponse `json:"file,omitempty"`
+}

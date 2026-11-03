@@ -72,6 +72,20 @@ func (r *FileRepository) FindByHash(hash string, ownerID uint64) (*model.File, e
 	return &f, nil
 }
 
+// FindAnyByHash 全局按 hash 查一正常行（S4 秒传跨用户提示用，不带 owner 归属）；
+// 无行返回 nil,nil（调用方判 miss），仅 DB 错才返回 error；软删行不可见
+func (r *FileRepository) FindAnyByHash(hash string) (*model.File, error) {
+	var f model.File
+	err := r.db.Select(fileColumns).Where("file_hash = ? AND is_deleted = 0", hash).First(&f).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("按哈希全局查文件: %w", err)
+	}
+	return &f, nil
+}
+
 // ListByParent 按父目录分页（文件夹置顶）；total 供 S3 分页用
 func (r *FileRepository) ListByParent(ownerID, parentID uint64, offset, limit int) ([]*model.File, int64, error) {
 	if limit < 1 {

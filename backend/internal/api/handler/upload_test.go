@@ -2,6 +2,8 @@ package handler_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -125,18 +127,95 @@ func TestUploadFileParentOwnership(t *testing.T) {
 func TestUploadFileDuplicate(t *testing.T) {
 	r, mgr := newFileRouter(t)
 	a := tok(t, mgr, 1)
+	b := tok(t, mgr, 2)
 
 	w := doUpload(r, a, "file", "a.pdf", testPDF, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("首次应 200, 得到 %d %s", w.Code, w.Body.String())
 	}
-	// 同内容二次传 → 409/40006（W5 转被动秒传前契约）
+	_, _, first := decodeBody(t, w)
+	// S4 被动秒传：本人同内容二次传直接 200 返回既有行，不再 409
 	w = doUpload(r, a, "file", "b.pdf", testPDF, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("二次应被动秒传 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	_, _, second := decodeBody(t, w)
+	if second["id"] != first["id"] {
+		t.Fatalf("被动秒传应同 id: %v vs %v", second["id"], first["id"])
+	}
+	// 跨用户同 hash：uk 全局唯一仍 409/40006
+	w = doUpload(r, b, "file", "c.pdf", testPDF, "")
 	if w.Code != http.StatusConflict {
-		t.Fatalf("二次同 hash 应 409, 得到 %d %s", w.Code, w.Body.String())
+		t.Fatalf("跨用户同 hash 应 409, 得到 %d %s", w.Code, w.Body.String())
 	}
 	if code, _, _ := decodeBody(t, w); code != 40006 {
 		t.Fatalf("code = %d, 期望 40006 %s", code, w.Body.String())
+	}
+}
+
+func TestInstantCheckAPI(t *testing.T) {
+	r, mgr := newFileRouter(t)
+	a := tok(t, mgr, 1)
+	b := tok(t, mgr, 2)
+
+	sum := sha256.Sum256(testPDF)
+	hash := hex.EncodeToString(sum[:])
+
+	// 全 miss → 200 hit=false
+	w := doFile(r, http.MethodPost, "/api/v1/files/instant-check", fmt.Sprintf(`{"file_name":"a.pdf","parent_id":0,"file_hash":%q}`, hash), a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("预检应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	code, _, data := decodeBody(t, w)
+	if code != 0 || data["hit"] != false {
+		t.Fatalf("全新应 hit=false: code=%d data=%v %s", code, data, w.Body.String())
+	}
+
+	// 非法 hash → 400/10001
+	w = doFile(r, http.MethodPost, "/api/v1/files/instant-check", `{"file_name":"a.pdf","file_hash":"zzz"}`, a)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("坏hash应 400, 得到 %d %s", w.Code, w.Body.String())
+	}
+	if code, _, _ := decodeBody(t, w); code != 10001 {
+		t.Fatalf("code = %d, 期望 10001 %s", code, w.Body.String())
+	}
+
+	// 上传后本人命中 → hit=true 同 id
+	w = doUpload(r, a, "file", "a.pdf", testPDF, "")
+	_, _, first := decodeBody(t, w)
+	w = doFile(r, http.MethodPost, "/api/v1/files/instant-check", fmt.Sprintf(`{"file_name":"a.pdf","parent_id":0,"file_hash":%q}`, hash), a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("本人预检应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	_, _, data = decodeBody(t, w)
+	if data["hit"] != true {
+		t.Fatalf("本人应 hit=true: %v %s", data, w.Body.String())
+	}
+	fm, _ := data["file"].(map[string]any)
+	if fm == nil || fm["id"] != first["id"] {
+		t.Fatalf("秒传应同 id: %v vs %v", fm, first)
+	}
+
+	// 他人全局命中 → hit=false exists_global=true
+	w = doFile(r, http.MethodPost, "/api/v1/files/instant-check", fmt.Sprintf(`{"file_name":"b.pdf","parent_id":0,"file_hash":%q}`, hash), b)
+	if w.Code != http.StatusOK {
+		t.Fatalf("他人预检应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	_, _, data = decodeBody(t, w)
+	if data["hit"] != false || data["exists_global"] != true {
+		t.Fatalf("他人应 exists_global: %v %s", data, w.Body.String())
+	}
+
+	// 坏 parent → 404/40004
+	w = doFile(r, http.MethodPost, "/api/v1/files/instant-check", fmt.Sprintf(`{"file_name":"a.pdf","parent_id":999999,"file_hash":%q}`, hash), a)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("坏parent应 404, 得到 %d %s", w.Code, w.Body.String())
+	}
+
+	// 无头 → 401
+	w = doFile(r, http.MethodPost, "/api/v1/files/instant-check", fmt.Sprintf(`{"file_name":"a.pdf","file_hash":%q}`, hash), "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("无头应 401, 得到 %d %s", w.Code, w.Body.String())
 	}
 }
 

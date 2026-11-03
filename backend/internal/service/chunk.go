@@ -472,14 +472,16 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 	if err := s.checkParent(ownerID, parentID); err != nil {
 		return nil, err
 	}
-	// 幂等短路：同人同 hash 已有正常行，直接 Cancel + 清盘返回既有行，不二次扣配额
-	// 已取消会话同样走幂等（重复 complete 返回既有行），无行才 404
+	// 幂等短路：同人同 hash 已有正常行且存储对象仍在，直接 Cancel + 清盘返回既有行，不二次扣配额
+	// blob 已丢时不短路，落到正常合并流程重建自愈；已取消会话同样走幂等，无行才 404
 	if f, err := s.files.FindByHash(canonicalHash, ownerID); err != nil {
 		return nil, err
 	} else if f != nil {
-		_ = s.chunks.Cancel(uploadID, ownerID)
-		s.cleanupSession(uploadID)
-		return f, nil
+		if _, ok := s.store.Exists(canonicalHash); ok {
+			_ = s.chunks.Cancel(uploadID, ownerID)
+			s.cleanupSession(uploadID)
+			return f, nil
+		}
 	}
 	if sess.Status == 2 {
 		return nil, ErrChunkNotFound

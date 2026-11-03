@@ -49,7 +49,7 @@ func validSHA256(h string) bool {
 }
 
 // InstantCheck 秒传预检（只读+存储存在性双判，不写 DB 不碰配额，<1s）：
-// 本人命中直返；他人命中置 ExistsGlobal（孤儿引用即盘无对象时当 miss）；全 miss 双 false
+// 本人/他人命中均须存储对象仍在才算命中；blob 丢失一律当 miss 让前端重传自愈
 func (s *UploadService) InstantCheck(ownerID, parentID uint64, fileName, fileHash string) (*InstantResult, error) {
 	if ownerID == 0 {
 		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidName)
@@ -67,7 +67,10 @@ func (s *UploadService) InstantCheck(ownerID, parentID uint64, fileName, fileHas
 	if f, err := s.files.FindByHash(canonical, ownerID); err != nil {
 		return nil, err
 	} else if f != nil {
-		return &InstantResult{File: f, Hit: true}, nil
+		// 本人命中须二次校验存储对象：blob 丢失时不当命中，落到全局/全 miss 让前端重传自愈
+		if _, ok := s.store.Exists(canonical); ok {
+			return &InstantResult{File: f, Hit: true}, nil
+		}
 	}
 	any, err := s.files.FindAnyByHash(canonical)
 	if err != nil {
@@ -187,12 +190,15 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 	}
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
-	// S4 被动秒传：本人已有同 hash 直接返回既有行（0 字节净增，不写存储不落库）。
+	// S4 被动秒传：本人已有同 hash 且存储对象仍在，直接返回既有行（0 字节净增）。
 	// 必须先于配额预检：配额已满时重传已有文件仍应秒传成功，否则永远走不到短路。
+	// blob 已丢时不短路，落到正常 Store 流程重建自愈，避免返回不可下载的孤儿引用。
 	if existing, err := s.files.FindByHash(hash, ownerID); err != nil {
 		return nil, err
 	} else if existing != nil {
-		return existing, nil
+		if _, ok := s.store.Exists(hash); ok {
+			return existing, nil
+		}
 	}
 	// S5 配额闭环：声明 size 预检已过，此处按实测 actual 再卡一次（client 可能谎报 size）
 	if err := s.checkQuota(ownerID, uint64(len(data))); err != nil {

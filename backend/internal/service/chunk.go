@@ -254,11 +254,17 @@ func (s *ChunkService) partAbsPath(uploadID string, index uint32) (abs, rel stri
 }
 
 // savePart 流式落盘：tmp 写完 Rename 原子生效；CopyN 上限 cs+1，超限删 tmp 并报参错
+// tmp 文件名带进程内唯一随机后缀：同 uploadID+index 并发重传时各写各的 tmp，
+// Rename 串行生效保证最后一次为准，避免共用 `<abs>.tmp-<pid>` 被 O_TRUNC 互相截断
 func (s *ChunkService) savePart(abs string, chunkSize uint64, src io.Reader) (uint64, error) {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return 0, fmt.Errorf("建分片目录: %w", err)
 	}
-	tmp := fmt.Sprintf("%s.tmp-%d", abs, os.Getpid())
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return 0, fmt.Errorf("生成临时文件名: %w", err)
+	}
+	tmp := fmt.Sprintf("%s.tmp-%d-%s", abs, os.Getpid(), hex.EncodeToString(rnd[:]))
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return 0, fmt.Errorf("建分片临时文件: %w", err)

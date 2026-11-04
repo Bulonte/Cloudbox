@@ -24,12 +24,72 @@ var ErrFileNotFound = repository.ErrFileNotFound
 // ErrInvalidParent 父目录非法，复用仓储层哨兵
 var ErrInvalidParent = repository.ErrInvalidParent
 
-// ErrFileConflict 同 hash 已存在（uk_hash），复用仓储层哨兵（W5 转被动秒传前按 409 闭合）
+// ErrFileConflict 同 hash 已存在（uk_hash 全局唯一，S4 后本人重复走被动秒传直返，跨用户仍按 409 闭合）
 var ErrFileConflict = repository.ErrFileConflict
 
-// UploadService 单文件上传编排：S5 校验 → SHA256 → S4 落盘 → S1 落库
+// ErrQuotaExceeded 配额不足（映射 HTTP 400 / code 30002；分片链路复用 service.ErrQuotaExceeded 同语义）
+var ErrQuotaExceeded = errors.New("配额不足")
+
+// InstantResult 秒传预检结果：Hit=true 表本人已有（秒传成功，File 为既有行）；
+// Hit=false + ExistsGlobal=true 表他人已存（全局提示，前端可跳过上传，实传仍 409）；
+// 全 miss 时 File=nil 双 false，前端走正常上传
+type InstantResult struct {
+	File         *model.File
+	Hit          bool
+	ExistsGlobal bool
+}
+
+// validSHA256 hash 规则：64 位 hex，大小写均放行（与 chunk 会话口径一致）
+func validSHA256(h string) bool {
+	if len(h) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimSpace(h))
+	return err == nil
+}
+
+// InstantCheck 秒传预检（只读+存储存在性双判，不写 DB 不碰配额，<1s）：
+// 本人/他人命中均须存储对象仍在才算命中；blob 丢失一律当 miss 让前端重传自愈
+func (s *UploadService) InstantCheck(ownerID, parentID uint64, fileName, fileHash string) (*InstantResult, error) {
+	if ownerID == 0 {
+		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidName)
+	}
+	if !validFileName(fileName) {
+		return nil, ErrInvalidName
+	}
+	if !validSHA256(strings.TrimSpace(fileHash)) {
+		return nil, ErrInvalidName
+	}
+	if err := s.checkParent(ownerID, parentID); err != nil {
+		return nil, err
+	}
+	canonical := strings.ToLower(strings.TrimSpace(fileHash))
+	if f, err := s.files.FindByHash(canonical, ownerID); err != nil {
+		return nil, err
+	} else if f != nil {
+		// 本人命中须二次校验存储对象：blob 丢失时不当命中，落到全局/全 miss 让前端重传自愈
+		if _, ok := s.store.Exists(canonical); ok {
+			return &InstantResult{File: f, Hit: true}, nil
+		}
+	}
+	any, err := s.files.FindAnyByHash(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if any == nil {
+		return &InstantResult{Hit: false}, nil
+	}
+	// 他人已存：存储对象在才算全局命中，盘丢了当 miss 让前端正常上传重建
+	if _, ok := s.store.Exists(canonical); ok {
+		return &InstantResult{Hit: false, ExistsGlobal: true}, nil
+	}
+	return &InstantResult{Hit: false}, nil
+}
+
+// UploadService 单文件上传编排：S5 校验 → SHA256 → S4 落盘 → S1 落库 + S5 配额闭环
 type UploadService struct {
 	files     *repository.FileRepository
+	users     *repository.UserRepository
 	store     storage.Storage
 	maxSimple int64
 }
@@ -40,6 +100,33 @@ func NewUploadService(files *repository.FileRepository, store storage.Storage, m
 		maxSimple = MaxSimpleUploadSize
 	}
 	return &UploadService{files: files, store: store, maxSimple: maxSimple}
+}
+
+// WithUsers 注入用户仓储（S5 配额预检+原子扣减用；nil 即无配额模式，老单测兼容）
+func (s *UploadService) WithUsers(u *repository.UserRepository) *UploadService {
+	s.users = u
+	return s
+}
+
+// checkQuota 配额预检（nil 用户仓储时跳过；与 ChunkService 同语义：只读不扣减）
+func (s *UploadService) checkQuota(ownerID, size uint64) error {
+	if s.users == nil {
+		return nil
+	}
+	u, err := s.users.FindByID(ownerID)
+	if err != nil {
+		return err
+	}
+	if size > u.QuotaBytes {
+		return ErrQuotaExceeded
+	}
+	if u.UsedBytes+size < u.UsedBytes {
+		return ErrQuotaExceeded
+	}
+	if u.UsedBytes+size > u.QuotaBytes {
+		return ErrQuotaExceeded
+	}
+	return nil
 }
 
 // MaxSimpleSize 服务端单文件上限（handler 设 MaxBytesReader 用）
@@ -103,9 +190,33 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 	}
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
+	// S4 被动秒传：本人已有同 hash 且存储对象仍在，直接返回既有行（0 字节净增）。
+	// 必须先于配额预检：配额已满时重传已有文件仍应秒传成功，否则永远走不到短路。
+	// blob 已丢时不短路，落到正常 Store 流程重建自愈，避免返回不可下载的孤儿引用。
+	if existing, err := s.files.FindByHash(hash, ownerID); err != nil {
+		return nil, err
+	} else if existing != nil {
+		if _, ok := s.store.Exists(hash); ok {
+			return existing, nil
+		}
+	}
+	// S5 配额闭环：声明 size 预检已过，此处按实测 actual 再卡一次（client 可能谎报 size）
+	if err := s.checkQuota(ownerID, uint64(len(data))); err != nil {
+		return nil, err
+	}
 	rel, err := s.store.Store(hash, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("落盘失败: %w", err)
+	}
+	// S5 原子真扣：false 即并发超额，转 ErrQuotaExceeded；nil 用户仓储时跳过（老单测兼容）
+	if s.users != nil {
+		ok, err := s.users.IncrUsedBytesIfEnough(ownerID, uint64(len(data)))
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, ErrQuotaExceeded
+		}
 	}
 	f := &model.File{
 		FileName: strings.TrimSpace(fileName),
@@ -118,6 +229,15 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 		IsFolder: 0,
 	}
 	if err := s.files.CreateFile(f); err != nil {
+		// S5 回补：落库失败一律回补配额；uk 冲突的自抢回查转秒传直返，他人仍 409
+		if s.users != nil {
+			_ = s.users.DecrUsedBytes(ownerID, uint64(len(data)))
+		}
+		if errors.Is(err, ErrFileConflict) {
+			if existing, rerr := s.files.FindByHash(hash, ownerID); rerr == nil && existing != nil {
+				return existing, nil
+			}
+		}
 		return nil, err
 	}
 	return f, nil

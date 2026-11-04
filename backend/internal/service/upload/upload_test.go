@@ -3,6 +3,8 @@ package upload
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -30,7 +32,37 @@ func newUploadService(t *testing.T) *UploadService {
 	if err != nil {
 		t.Fatalf("建存储失败: %v", err)
 	}
-	return NewUploadService(repository.NewFileRepository(db), st, MaxSimpleUploadSize)
+	ur := repository.NewUserRepository(db)
+	db.Create(&model.User{Username: "alice", Email: "alice@f.com", PasswordHash: "h", QuotaBytes: 10737418240})
+	db.Create(&model.User{Username: "bob", Email: "bob@f.com", PasswordHash: "h", QuotaBytes: 10737418240})
+	s := NewUploadService(repository.NewFileRepository(db), st, MaxSimpleUploadSize)
+	return s.WithUsers(ur)
+}
+
+// newQuotaService 配额专用：建 quota 指定用户，返回服务与用户 id
+func newQuotaService(t *testing.T, quota uint64) (*UploadService, *repository.UserRepository, uint64) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		t.Fatalf("open sqlite memory: %v", err)
+	}
+	if err := db.AutoMigrate(&model.User{}, &model.File{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+	st, err := storage.NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("建存储失败: %v", err)
+	}
+	ur := repository.NewUserRepository(db)
+	db.Create(&model.User{Username: "q", Email: "q@f.com", PasswordHash: "h", QuotaBytes: quota})
+	u, err := ur.FindByUsername("q")
+	if err != nil {
+		t.Fatalf("查配额用户失败: %v", err)
+	}
+	s := NewUploadService(repository.NewFileRepository(db), st, MaxSimpleUploadSize).WithUsers(ur)
+	return s, ur, u.ID
 }
 
 func TestUploadOK(t *testing.T) {
@@ -134,12 +166,73 @@ func TestUploadParent(t *testing.T) {
 
 func TestUploadDuplicateHash(t *testing.T) {
 	s := newUploadService(t)
-	if _, err := s.Upload(1, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); err != nil {
+	first, err := s.Upload(1, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
 		t.Fatalf("首次失败: %v", err)
 	}
-	// 同内容二次传：uk_hash 全局唯一 → ErrFileConflict（W5 转被动秒传前按 409 闭合）
-	if _, err := s.Upload(1, 0, "b.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); !errors.Is(err, ErrFileConflict) {
-		t.Fatalf("二次同 hash 应 ErrFileConflict, 得到 %v", err)
+	// S4 被动秒传：本人同内容二次传直接返回既有行，不再报 409
+	second, err := s.Upload(1, 0, "b.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
+		t.Fatalf("二次应被动秒传直返, 得到 %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("被动秒传应同 id: %d vs %d", second.ID, first.ID)
+	}
+	// 跨用户同 hash：uk_hash 全局唯一仍报冲突（降级口径，前端凭 instant-check exists_global 提示跳过）
+	if _, err := s.Upload(2, 0, "c.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead))); !errors.Is(err, ErrFileConflict) {
+		t.Fatalf("跨用户同 hash 应 ErrFileConflict, 得到 %v", err)
+	}
+}
+
+func TestInstantCheck(t *testing.T) {
+	s := newUploadService(t)
+	sum := sha256.Sum256(pdfHead)
+	hash := hex.EncodeToString(sum[:])
+	// 全 miss
+	res, err := s.InstantCheck(1, 0, "a.pdf", hash)
+	if err != nil || res.Hit || res.ExistsGlobal || res.File != nil {
+		t.Fatalf("全新应双 false: %+v %v", res, err)
+	}
+	// 非法 hash/文件名/用户
+	if _, err := s.InstantCheck(1, 0, "a.pdf", "zzz"); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("坏hash应 ErrInvalidName, 得到 %v", err)
+	}
+	if _, err := s.InstantCheck(1, 0, "   ", hash); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("空名应 ErrInvalidName, 得到 %v", err)
+	}
+	if _, err := s.InstantCheck(0, 0, "a.pdf", hash); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("零用户应 ErrInvalidName, 得到 %v", err)
+	}
+	// 坏 parent → 404 系
+	if _, err := s.InstantCheck(1, 999999, "a.pdf", hash); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("坏parent应 ErrFileNotFound, 得到 %v", err)
+	}
+	// 上传后本人命中
+	f, err := s.Upload(1, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
+		t.Fatalf("上传失败: %v", err)
+	}
+	res, err = s.InstantCheck(1, 0, "a.pdf", hash)
+	if err != nil || !res.Hit || res.File == nil || res.File.ID != f.ID {
+		t.Fatalf("本人应命中: %+v %v", res, err)
+	}
+	// 大小写兼容
+	res, err = s.InstantCheck(1, 0, "a.pdf", strings.ToUpper(hash))
+	if err != nil || !res.Hit {
+		t.Fatalf("大写hash应命中: %+v %v", res, err)
+	}
+	// 他人全局命中（uk 全局唯一，实传仍 409，前端凭此提示跳过）
+	res, err = s.InstantCheck(2, 0, "b.pdf", hash)
+	if err != nil || res.Hit || !res.ExistsGlobal || res.File != nil {
+		t.Fatalf("他人应 exists_global: %+v %v", res, err)
+	}
+	// 孤儿引用（盘删了）当 miss
+	if err := s.store.Delete(f.FilePath); err != nil {
+		t.Fatalf("删盘失败: %v", err)
+	}
+	res, err = s.InstantCheck(2, 0, "b.pdf", hash)
+	if err != nil || res.Hit || res.ExistsGlobal {
+		t.Fatalf("孤儿应 miss: %+v %v", res, err)
 	}
 }
 
@@ -157,5 +250,35 @@ func TestUploadLongChineseFileName(t *testing.T) {
 	tooLong := strings.Repeat("测", 252) + ".pdf"
 	if validFileName(tooLong) {
 		t.Fatalf("256 rune 应拒")
+	}
+}
+
+func TestUploadQuota(t *testing.T) {
+	// quota=100：pdfHead 15B 成功扣 15；再传 90B（15+90=105 超额）→ ErrQuotaExceeded 且 used 不变
+	s, ur, uid := newQuotaService(t, 100)
+	f, err := s.Upload(uid, 0, "a.pdf", bytes.NewReader(pdfHead), int64(len(pdfHead)))
+	if err != nil {
+		t.Fatalf("首次应成功: %v", err)
+	}
+	if f.FileSize != uint64(len(pdfHead)) {
+		t.Fatalf("大小不对: %d", f.FileSize)
+	}
+	u, _ := ur.FindByID(uid)
+	if u.UsedBytes != uint64(len(pdfHead)) {
+		t.Fatalf("配额应扣 %d, 得到 %d", len(pdfHead), u.UsedBytes)
+	}
+	// 90 字节内容：pdf 头 + 填充至 90，保证三层校验过
+	big := append(append([]byte{}, pdfHead...), bytes.Repeat([]byte("x"), 90-len(pdfHead))...)
+	if _, err := s.Upload(uid, 0, "b.pdf", bytes.NewReader(big), int64(len(big))); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("超额应 ErrQuotaExceeded, 得到 %v", err)
+	}
+	u2, _ := ur.FindByID(uid)
+	if u2.UsedBytes != u.UsedBytes {
+		t.Fatalf("超额不应扣: %d vs %d", u2.UsedBytes, u.UsedBytes)
+	}
+	// 声明 size 谎报：实际 15 但声明 10，仍按 actual 卡（quota=10 时 15 应拒）
+	s2, _, uid2 := newQuotaService(t, 10)
+	if _, err := s2.Upload(uid2, 0, "a.pdf", bytes.NewReader(pdfHead), 10); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("actual超额应拒, 得到 %v", err)
 	}
 }

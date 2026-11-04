@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"cloudbox/internal/model"
@@ -186,5 +187,53 @@ func TestFileRepoList(t *testing.T) {
 	// limit 上限截断不断言行数，只断言不炸
 	if _, _, err := repo.ListByParent(1, 0, -5, 5000); err != nil {
 		t.Fatalf("非法分页应兜底不报错: %v", err)
+	}
+}
+
+func TestFileRepoFindByHash(t *testing.T) {
+	repo, cleanup := newFileRepo(t)
+	defer cleanup()
+
+	f := seedFile(t, repo, 1, "h.txt", 0, 0)
+	got, err := repo.FindByHash(f.FileHash, 1)
+	if err != nil || got == nil || got.ID != f.ID {
+		t.Fatalf("按hash应命中: %+v %v", got, err)
+	}
+	// 他人不可见 → nil,nil（调用方判幂等，不判错）
+	got, err = repo.FindByHash(f.FileHash, 2)
+	if err != nil || got != nil {
+		t.Fatalf("他人应 miss-nil: %+v %v", got, err)
+	}
+	// 软删后不可见 → nil,nil（uk 冲突留给 CreateFile 报 409）
+	if err := repo.SoftDelete(f.ID, 1); err != nil {
+		t.Fatalf("软删失败: %v", err)
+	}
+	got, err = repo.FindByHash(f.FileHash, 1)
+	if err != nil || got != nil {
+		t.Fatalf("软删后应 miss-nil: %+v %v", got, err)
+	}
+}
+
+func TestFileRepoFindAnyByHash(t *testing.T) {
+	repo, cleanup := newFileRepo(t)
+	defer cleanup()
+
+	f := seedFile(t, repo, 1, "g.txt", 0, 0)
+	got, err := repo.FindAnyByHash(f.FileHash)
+	if err != nil || got == nil || got.ID != f.ID {
+		t.Fatalf("全局应命中: %+v %v", got, err)
+	}
+	// 无行 → nil,nil
+	got, err = repo.FindAnyByHash(strings.Repeat("f", 64))
+	if err != nil || got != nil {
+		t.Fatalf("无行应 miss-nil: %+v %v", got, err)
+	}
+	// 软删后不可见 → nil,nil
+	if err := repo.SoftDelete(f.ID, 1); err != nil {
+		t.Fatalf("软删失败: %v", err)
+	}
+	got, err = repo.FindAnyByHash(f.FileHash)
+	if err != nil || got != nil {
+		t.Fatalf("软删后全局应 miss-nil: %+v %v", got, err)
 	}
 }

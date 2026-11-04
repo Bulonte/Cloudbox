@@ -34,6 +34,30 @@ func (r *UserRepository) FindByID(id uint64) (*model.User, error) {
 	return r.findOne("id = ?", id)
 }
 
+// IncrUsedBytesIfEnough 配额原子扣减（W5-S3 唯一真扣减点）；ok=false 表配额不足
+func (r *UserRepository) IncrUsedBytesIfEnough(id, delta uint64) (bool, error) {
+	res := r.db.Model(&model.User{}).Where("id = ? AND used_bytes + ? <= quota_bytes", id, delta).UpdateColumn("used_bytes", gorm.Expr("used_bytes + ?", delta))
+	if res.Error != nil {
+		return false, fmt.Errorf("扣减配额: %w", res.Error)
+	}
+	if res.RowsAffected == 1 {
+		return true, nil
+	}
+	// 0 行：区分用户没了与配额不够
+	if _, err := r.FindByID(id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// DecrUsedBytes 配额回补（CreateFile 失败补偿）；saturating 到 0，不报错
+func (r *UserRepository) DecrUsedBytes(id, delta uint64) error {
+	if err := r.db.Model(&model.User{}).Where("id = ?", id).UpdateColumn("used_bytes", gorm.Expr("CASE WHEN used_bytes >= ? THEN used_bytes - ? ELSE 0 END", delta, delta)).Error; err != nil {
+		return fmt.Errorf("回补配额: %w", err)
+	}
+	return nil
+}
+
 // FindByUsername 按用户名查（登录用）；查不到返回 ErrUserNotFound
 func (r *UserRepository) FindByUsername(username string) (*model.User, error) {
 	return r.findOne("username = ?", username)

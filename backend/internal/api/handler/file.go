@@ -19,6 +19,7 @@ import (
 )
 
 // 文件错误码：10001 参数错；20002 认证失败；40004 文件不存在（含越权伪装）；40006 同名已存在；90001 服务器内部错误
+// （30002 配额不足定义在 chunk.go，同一 handler 包共用）
 const (
 	codeFileNotFound = 40004
 	codeFileConflict = 40006
@@ -205,6 +206,31 @@ func attachmentOf(name string) string {
 	return `attachment; filename="` + escaped + `"; filename*=UTF-8''` + url.PathEscape(name)
 }
 
+// InstantCheck POST /api/v1/files/instant-check：秒传预检（只读+存储双判，不写盘）
+// hit=true 本人已有直接秒传；hit=false+exists_global=true 他人已存（uk全局唯一实传仍409）；全miss走正常上传
+func (h *FileHandler) InstantCheck(c *gin.Context) {
+	if h.uploader == nil {
+		response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
+		return
+	}
+	var req dto.InstantCheckRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	res, err := h.uploader.InstantCheck(c.GetUint64(middleware.CtxUserID), req.ParentID, req.FileName, req.FileHash)
+	if err != nil {
+		h.failFile(c, err)
+		return
+	}
+	resp := dto.InstantCheckResponse{Hit: res.Hit, ExistsGlobal: res.ExistsGlobal}
+	if res.File != nil {
+		f := ToFileResponse(res.File)
+		resp.File = &f
+	}
+	response.OK(c, resp)
+}
+
 // ListFiles GET /api/v1/files：按 parent 分页（夹置顶）；空目录 items=[] 非 null
 func (h *FileHandler) ListFiles(c *gin.Context) {
 	var q dto.ListFilesQuery
@@ -224,9 +250,12 @@ func (h *FileHandler) ListFiles(c *gin.Context) {
 	response.OK(c, dto.FileListResponse{Total: total, Page: page, PageSize: pageSize, Items: items})
 }
 
-// failFile 文件错误统一映射：越权/已删/父夹非法一律 404 伪装；上传三层校验一律 400/10001
+// failFile 文件错误统一映射：越权/已删/父夹非法一律 404 伪装；上传三层校验一律 400/10001；配额 400/30002
 func (h *FileHandler) failFile(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, service.ErrQuotaExceeded),
+		errors.Is(err, upload.ErrQuotaExceeded):
+		response.Fail(c, http.StatusBadRequest, codeQuotaExceeded, err.Error())
 	case errors.Is(err, service.ErrInvalidParams),
 		errors.Is(err, service.ErrNotDownloadable),
 		errors.Is(err, upload.ErrTooLarge),

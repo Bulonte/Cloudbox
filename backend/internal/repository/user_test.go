@@ -154,3 +154,42 @@ func TestUserRepoUpdatePasswordHash(t *testing.T) {
 		t.Fatalf("不存在 ID 应返回 ErrUserNotFound, 得到 %v", err)
 	}
 }
+
+func TestUserRepoQuotaAtomic(t *testing.T) {
+	repo, cleanup := newUserRepo(t)
+	defer cleanup()
+
+	u := &model.User{Username: "quota1", Email: "quota1@example.com", PasswordHash: "h", QuotaBytes: 100}
+	if err := repo.CreateUser(u); err != nil {
+		t.Fatalf("创建用户失败: %v", err)
+	}
+	// 足额扣 60
+	ok, err := repo.IncrUsedBytesIfEnough(u.ID, 60)
+	if err != nil || !ok {
+		t.Fatalf("足额应扣成功: ok=%v err=%v", ok, err)
+	}
+	// 超额 50 应 false 不扣
+	ok, err = repo.IncrUsedBytesIfEnough(u.ID, 50)
+	if err != nil || ok {
+		t.Fatalf("超额应 false: ok=%v err=%v", ok, err)
+	}
+	got, _ := repo.FindByID(u.ID)
+	if got.UsedBytes != 60 {
+		t.Fatalf("超额不应扣: used=%d", got.UsedBytes)
+	}
+	// 回补 60 归零，再回补 saturating 到 0
+	if err := repo.DecrUsedBytes(u.ID, 60); err != nil {
+		t.Fatalf("回补失败: %v", err)
+	}
+	if err := repo.DecrUsedBytes(u.ID, 999); err != nil {
+		t.Fatalf("超额回补应 saturating: %v", err)
+	}
+	got, _ = repo.FindByID(u.ID)
+	if got.UsedBytes != 0 {
+		t.Fatalf("回补应归零: used=%d", got.UsedBytes)
+	}
+	// 用户没了转 ErrUserNotFound
+	if _, err := repo.IncrUsedBytesIfEnough(999999, 1); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("无用户应 ErrUserNotFound, 得到 %v", err)
+	}
+}

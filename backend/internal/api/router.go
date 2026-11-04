@@ -41,11 +41,22 @@ func RegisterAdminRoutes(r *gin.Engine, mgr *jwt.Manager, checker middleware.Rev
 	})
 }
 
-// RegisterFileRoutes 注册文件路由组（W4-S2 建夹/改名移动/软删 + S3 列表 + S6 单文件上传 + S7 流式下载，全挂 AuthRequired；细粒度归属由 Service 层判）
+// RegisterUploadRoutes 注册分片上传路由组（W5-S1 会话初始化 + S2 单分片上传 + S3 合并收官 + S5 进度查询/取消，全挂 AuthRequired；细粒度归属由 Service 层判）
+func RegisterUploadRoutes(r *gin.Engine, h *handler.ChunkHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
+	up := r.Group("/api/v1/uploads", middleware.AuthRequired(mgr, checker))
+	up.POST("/init", h.InitUpload)
+	up.GET("/:id/progress", h.GetProgress)
+	up.POST("/:id/cancel", h.CancelUpload)
+	up.POST("/:id/chunks", h.UploadChunk)
+	up.POST("/:id/complete", h.CompleteUpload)
+}
+
+// RegisterFileRoutes 注册文件路由组（W4-S2 建夹/改名移动/软删 + S3 列表 + S6 单文件上传 + S7 流式下载 + S4 秒传预检，全挂 AuthRequired；细粒度归属由 Service 层判）
 func RegisterFileRoutes(r *gin.Engine, h *handler.FileHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, checker))
 	files.GET("", h.ListFiles)
 	files.POST("", h.UploadFile)
+	files.POST("/instant-check", h.InstantCheck)
 	files.POST("/folders", h.CreateFolder)
 	files.GET("/:id/download", h.DownloadFile)
 	files.PUT("/:id", h.UpdateFile)

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -70,6 +71,30 @@ func (r *ShareRepository) CancelShare(id, ownerID uint64) error {
 	res := r.db.Model(&model.FileShare{}).Where("id = ? AND owner_id = ? AND status = 1", id, ownerID).Update("status", 0)
 	if res.Error != nil {
 		return fmt.Errorf("取消分享: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrShareNotFound
+	}
+	return nil
+}
+
+// SetExpireAt 调整过期时间（单测/管理校准用；生产创建后一般不变）
+func (r *ShareRepository) SetExpireAt(id uint64, exp sql.NullTime) error {
+	if err := r.db.Model(&model.FileShare{}).Where("id = ?", id).Update("expire_at", exp).Error; err != nil {
+		return fmt.Errorf("调整过期时间: %w", err)
+	}
+	return nil
+}
+
+// IncrDownloadCount 下载计数原子 +1（S2 公开下载用）：单条 UPDATE 防超发；
+// max_downloads 为空=不限，否则仅 download_count < max 时才 +1；
+// 0 行 affect（码错/取消/刚好被抢完）一律 ErrShareNotFound，前端只见"链接无效"
+func (r *ShareRepository) IncrDownloadCount(code string) error {
+	res := r.db.Model(&model.FileShare{}).
+		Where("share_code = ? AND status = 1 AND (max_downloads IS NULL OR download_count < max_downloads)", code).
+		Update("download_count", gorm.Expr("download_count + 1"))
+	if res.Error != nil {
+		return fmt.Errorf("累计下载次数: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {
 		return ErrShareNotFound

@@ -57,6 +57,13 @@ func RegisterShareRoutes(r *gin.Engine, h *handler.ShareHandler, mgr *jwt.Manage
 	shares.POST("", h.CreateShare)
 }
 
+// RegisterSharePublicRoutes 注册分享公开链路（S2：免登录；限流/伪装由 Service 层收口）
+// GET /s/:code?password= 访问元数据；GET /api/v1/shares/:code/download?password= 流式下载
+func RegisterSharePublicRoutes(r *gin.Engine, h *handler.ShareHandler) {
+	r.GET("/s/:code", h.GetShareInfo)
+	r.GET("/api/v1/shares/:code/download", h.DownloadShare)
+}
+
 // RegisterFileRoutes 注册文件路由组（W4-S2 建夹/改名移动/软删 + S3 列表 + S6 单文件上传 + S7 流式下载 + S4 秒传预检，全挂 AuthRequired；细粒度归属由 Service 层判）
 func RegisterFileRoutes(r *gin.Engine, h *handler.FileHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, checker))

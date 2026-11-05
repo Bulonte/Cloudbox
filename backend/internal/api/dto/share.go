@@ -17,3 +17,12 @@ type CreateShareResponse struct {
 	ExpireAt     *string `json:"expire_at,omitempty"`
 	MaxDownloads *int32  `json:"max_downloads,omitempty"`
 }
+
+// ShareInfoResponse 公开访问回显：只含脱敏元数据，不含 password_hash/内部路径
+type ShareInfoResponse struct {
+	ShareCode string  `json:"share_code"`
+	FileName  string  `json:"file_name"`
+	FileSize  uint64  `json:"file_size"`
+	MimeType  string  `json:"mime_type"`
+	ExpireAt  *string `json:"expire_at,omitempty"`
+}

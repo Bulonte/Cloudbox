@@ -81,16 +81,57 @@ func (h *ShareHandler) CreateShare(c *gin.Context) {
 	})
 }
 
-// failShare 分享错误统一映射：参数 400/10001；文件越权/不存在 404/40004
+// failShare 分享错误统一映射：参数 400/10001；限流 429/20005；
+// S1 创建链路文件归属错 → 404/40004「文件不存在」；S2 公开链路一律 → 404/40004「链接无效」防枚举
+// （Access/Download 已把过期/超次/密码错/文件夹/删文件收口为 repository.ErrShareNotFound）
 func (h *ShareHandler) failShare(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrInvalidParams):
 		response.Fail(c, http.StatusBadRequest, codeInvalidParams, err.Error())
+	case errors.Is(err, service.ErrTooManyAttempts):
+		response.Fail(c, http.StatusTooManyRequests, codeTooMany, err.Error())
+	case errors.Is(err, repository.ErrShareNotFound):
+		response.Fail(c, http.StatusNotFound, codeFileNotFound, "链接无效")
 	case errors.Is(err, service.ErrFileNotFound),
-		errors.Is(err, repository.ErrFileNotFound),
-		errors.Is(err, repository.ErrShareNotFound):
+		errors.Is(err, repository.ErrFileNotFound):
 		response.Fail(c, http.StatusNotFound, codeFileNotFound, "文件不存在")
 	default:
 		response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
 	}
+}
+
+// GetShareInfo GET /s/:code?password=：公开访问元数据，不鉴权；失败一律按 failShare 伪装
+func (h *ShareHandler) GetShareInfo(c *gin.Context) {
+	share, f, err := h.svc.AccessShare(c.Param("code"), c.Query("password"), c.ClientIP())
+	if err != nil {
+		h.failShare(c, err)
+		return
+	}
+	var expStr *string
+	if share.ExpireAt.Valid {
+		s := share.ExpireAt.Time.Format("2006-01-02 15:04:05")
+		expStr = &s
+	}
+	response.OK(c, dto.ShareInfoResponse{
+		ShareCode: share.ShareCode,
+		FileName:  f.FileName,
+		FileSize:  f.FileSize,
+		MimeType:  f.MimeType,
+		ExpireAt:  expStr,
+	})
+}
+
+// DownloadShare GET /api/v1/shares/:code/download?password=：公开流式下载，不鉴权；附件强制下载 + nosniff
+func (h *ShareHandler) DownloadShare(c *gin.Context) {
+	f, rc, size, err := h.svc.DownloadShare(c.Param("code"), c.Query("password"), c.ClientIP())
+	if err != nil {
+		h.failShare(c, err)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	ctype := contentTypeOf(f.MimeType)
+	c.Header("Content-Type", ctype)
+	c.Header("Content-Disposition", attachmentOf(f.FileName))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.DataFromReader(http.StatusOK, size, ctype, rc, nil)
 }

@@ -51,6 +51,12 @@ func RegisterUploadRoutes(r *gin.Engine, h *handler.ChunkHandler, mgr *jwt.Manag
 	up.POST("/:id/complete", h.CompleteUpload)
 }
 
+// RegisterShareRoutes 注册分享路由组（W6-S1 创建需登录；S2 访问/下载公开链路另接）
+func RegisterShareRoutes(r *gin.Engine, h *handler.ShareHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
+	shares := r.Group("/api/v1/shares", middleware.AuthRequired(mgr, checker))
+	shares.POST("", h.CreateShare)
+}
+
 // RegisterFileRoutes 注册文件路由组（W4-S2 建夹/改名移动/软删 + S3 列表 + S6 单文件上传 + S7 流式下载 + S4 秒传预检，全挂 AuthRequired；细粒度归属由 Service 层判）
 func RegisterFileRoutes(r *gin.Engine, h *handler.FileHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, checker))

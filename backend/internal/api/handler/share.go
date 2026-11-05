@@ -1,0 +1,96 @@
+package handler
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"cloudbox/internal/api/dto"
+	"cloudbox/internal/api/middleware"
+	"cloudbox/internal/pkg/response"
+	"cloudbox/internal/repository"
+	"cloudbox/internal/service"
+)
+
+// ShareHandler 分享 HTTP 层：只做 Bind/校验/错误码映射，不直调仓储
+type ShareHandler struct {
+	svc *service.ShareService
+}
+
+// NewShareHandler 构造注入分享服务
+func NewShareHandler(svc *service.ShareService) *ShareHandler {
+	return &ShareHandler{svc: svc}
+}
+
+// parseShareExpire 分享有效期解析：空=默认（service 层兜底）；支持 RFC3339 与 "2006-01-02 15:04:05"
+func parseShareExpire(s *string) (*time.Time, error) {
+	if s == nil || *s == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339, *s); err == nil {
+		return &t, nil
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", *s, time.Local); err == nil {
+		return &t, nil
+	}
+	return nil, errors.New("有效期格式非法")
+}
+
+// CreateShare POST /api/v1/shares：需登录；归属/参数错按文件链路口径映射
+func (h *ShareHandler) CreateShare(c *gin.Context) {
+	var req dto.CreateShareRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	exp, err := parseShareExpire(req.ExpireAt)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, err.Error())
+		return
+	}
+	row, err := h.svc.CreateShare(service.CreateShareInput{
+		OwnerID:      c.GetUint64(middleware.CtxUserID),
+		FileID:       req.FileID,
+		Password:     req.Password,
+		ExpireAt:     exp,
+		MaxDownloads: req.MaxDownloads,
+	})
+	if err != nil {
+		h.failShare(c, err)
+		return
+	}
+	var expStr *string
+	if row.ExpireAt.Valid {
+		s := row.ExpireAt.Time.Format("2006-01-02 15:04:05")
+		expStr = &s
+	}
+	var maxPtr *int32
+	if row.MaxDownloads.Valid {
+		v := row.MaxDownloads.Int32
+		maxPtr = &v
+	}
+	response.OK(c, dto.CreateShareResponse{
+		ID:           row.ID,
+		ShareCode:    row.ShareCode,
+		ShareURL:     "/s/" + row.ShareCode,
+		FileID:       row.FileID,
+		ExpireAt:     expStr,
+		MaxDownloads: maxPtr,
+	})
+}
+
+// failShare 分享错误统一映射：参数 400/10001；文件越权/不存在 404/40004
+func (h *ShareHandler) failShare(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrInvalidParams):
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, err.Error())
+	case errors.Is(err, service.ErrFileNotFound),
+		errors.Is(err, repository.ErrFileNotFound),
+		errors.Is(err, repository.ErrShareNotFound):
+		response.Fail(c, http.StatusNotFound, codeFileNotFound, "文件不存在")
+	default:
+		response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
+	}
+}

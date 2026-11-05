@@ -67,6 +67,9 @@ func main() {
 	}
 	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp).WithStorage(st).WithLocker(rdb)
 	api.RegisterUploadRoutes(r, handler.NewChunkHandler(chunkSvc), jwtMgr, checker)
+	// W6-S1：分享生成路由接线（POST /api/v1/shares，需登录；S2 公开链路另接）
+	shareSvc := service.NewShareService(repository.NewShareRepository(db), fileRepo)
+	api.RegisterShareRoutes(r, handler.NewShareHandler(shareSvc), jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

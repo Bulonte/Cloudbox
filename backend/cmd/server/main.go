@@ -48,8 +48,10 @@ func main() {
 	api.RegisterAuthRoutes(r, h, jwtMgr, checker)
 	// S4：/api/v1/users/me 接线 AuthRequired + Redis 吊销检查；S5 追加 PUT /password
 	api.RegisterUserRoutes(r, h, jwtMgr, checker)
-	// S6：管理演示路由纵向越权回归（W9 真管理接口复用同一条链）
-	api.RegisterAdminRoutes(r, jwtMgr, checker)
+	// W6-S4：审计旁路（C方案：detail 只记 ID/快照，禁记 share_code 明文/哈希；fail-open 不阻断主流程）
+	auditSvc := service.NewAuditService(repository.NewOperationLogRepository(db))
+	// S6：管理演示路由纵向越权回归（W9 真管理接口复用同一条链；S4 挂载 /operation-logs 查询）
+	api.RegisterAdminRoutes(r, jwtMgr, checker, handler.NewAdminHandler(auditSvc))
 	// W4-S2：文件夹 CRUD 路由接线（建夹/改名移动/软删）；W4-S7 下载存储注入
 	fileRepo := repository.NewFileRepository(db)
 	// W4-S6/S7：存储根创建失败直接 panic（上传内容寻址 + 下载流式回写共用）
@@ -57,7 +59,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fh := handler.NewFileHandler(service.NewFileService(fileRepo).WithStorage(st).WithChecker(permission.NewChecker()))
+	fh := handler.NewFileHandler(service.NewFileService(fileRepo).WithStorage(st).WithChecker(permission.NewChecker()).WithAuditor(auditSvc))
 	fh.WithUploader(upload.NewUploadService(fileRepo, st, cfg.Upload.MaxSimpleSize).WithUsers(repository.NewUserRepository(db)))
 	api.RegisterFileRoutes(r, fh, jwtMgr, checker)
 	// W5-S1：分片会话初始化路由接线（init 只建占位行，不碰 storage/Redis）
@@ -69,7 +71,7 @@ func main() {
 	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp).WithStorage(st).WithLocker(rdb)
 	api.RegisterUploadRoutes(r, handler.NewChunkHandler(chunkSvc), jwtMgr, checker)
 	// W6-S1：分享生成路由接线（POST /api/v1/shares，需登录；S2 公开链路另接）
-	shareSvc := service.NewShareService(repository.NewShareRepository(db), fileRepo).WithStorage(st).WithLimiter(rdb).WithChecker(permission.NewChecker())
+	shareSvc := service.NewShareService(repository.NewShareRepository(db), fileRepo).WithStorage(st).WithLimiter(rdb).WithChecker(permission.NewChecker()).WithAuditor(auditSvc)
 	api.RegisterShareRoutes(r, handler.NewShareHandler(shareSvc), jwtMgr, checker)
 	// W6-S2：分享公开链路（GET /s/:code + GET /api/v1/shares/:code/download，免登录；限流/伪装由 Service 层收口）
 	api.RegisterSharePublicRoutes(r, handler.NewShareHandler(shareSvc))

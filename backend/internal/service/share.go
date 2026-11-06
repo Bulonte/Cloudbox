@@ -35,6 +35,7 @@ const (
 
 // CreateShareInput 创建分享入参：密码/过期/次数均可选
 // S3：Role/Dept 由 handler 透传（JWT role；dept 预留，用户表暂无部门字段时传空即按 fail-closed 收口）
+// S4：IP 由 handler 透传 ClientIP，用于审计旁路；C方案 detail 只记 share_id/file_id/file_name，禁传 share_code
 type CreateShareInput struct {
 	OwnerID      uint64
 	Role         string
@@ -43,10 +44,12 @@ type CreateShareInput struct {
 	Password     string
 	ExpireAt     *time.Time
 	MaxDownloads *int32
+	IP           string
 }
 
 // ShareService 分享业务：归属 SQL 层判，参数规则放这里
 // S3：建链收口到 permission.Checker（需 manage；拒绝一律 ErrFileNotFound 伪装）
+// S4：审计旁路 WithAuditor（nil=不记，仅单测兼容；C方案 detail 只记 share_id/file_id/file_name，禁记 share_code 明文/哈希）
 type ShareService struct {
 	shares    *repository.ShareRepository
 	files     *repository.FileRepository
@@ -55,6 +58,7 @@ type ShareService struct {
 	rateLimit int
 	codeGen   func() (string, error)
 	checker   *permission.Checker
+	auditor   *AuditService
 }
 
 // NewShareService 构造注入分享+文件仓储
@@ -78,6 +82,20 @@ func (s *ShareService) WithLimiter(rdb RedisStore) *ShareService {
 func (s *ShareService) WithChecker(c *permission.Checker) *ShareService {
 	s.checker = c
 	return s
+}
+
+// WithAuditor 注入审计旁路（S4；nil=不记，仅单测兼容；C方案禁记 share_code 明文/哈希）
+func (s *ShareService) WithAuditor(a *AuditService) *ShareService {
+	s.auditor = a
+	return s
+}
+
+// auditRecord 审计旁路统一入口：nil 审计直接跳过；Record 内部已 fail-open，调用方禁判错
+func (s *ShareService) auditRecord(in AuditInput) {
+	if s == nil || s.auditor == nil {
+		return
+	}
+	_ = s.auditor.Record(in)
 }
 
 // WithRateLimit 覆盖每分钟阈值（<=0 忽略，默认 shareRateLimit）
@@ -137,14 +155,18 @@ func hashSharePassword(pw string) (sql.NullString, error) {
 
 // CreateShare 创建分享：归属校验 → 参数归一 → 碰撞重试；越权伪装 404
 // S3：有 Checker 时需 manage（所有者/超管天然过；public 读不给建链）；拒绝一律 ErrFileNotFound 伪装
+// S4：成功后审计 share_create（C方案：target=share/ID，detail={share_id,file_id,file_name}，禁记 share_code 明文/哈希；旁路失败不阻断）
 func (s *ShareService) CreateShare(in CreateShareInput) (*model.FileShare, error) {
 	if in.OwnerID == 0 || in.FileID == 0 {
 		return nil, fmt.Errorf("%w: 分享人与文件非法", ErrInvalidParams)
 	}
+	var auditFile *model.File
 	if s.checker == nil {
-		if _, err := s.files.FindByID(in.FileID, in.OwnerID); err != nil {
+		f, err := s.files.FindByID(in.FileID, in.OwnerID)
+		if err != nil {
 			return nil, err
 		}
+		auditFile = f
 	} else {
 		f, err := s.files.FindByIDAny(in.FileID)
 		if err != nil {
@@ -154,6 +176,7 @@ func (s *ShareService) CreateShare(in CreateShareInput) (*model.FileShare, error
 			return nil, ErrFileNotFound
 		}
 		in.OwnerID = f.OwnerID
+		auditFile = f
 	}
 	now := time.Now()
 	exp, err := normalizeExpiry(in.ExpireAt, now)
@@ -179,6 +202,23 @@ func (s *ShareService) CreateShare(in CreateShareInput) (*model.FileShare, error
 		}
 		err = s.shares.CreateShare(row)
 		if err == nil {
+			// S4审计旁路：C方案只记 share_id/file_id/file_name 快照，禁记 share_code 明文/哈希
+			fileName := ""
+			if auditFile != nil {
+				fileName = auditFile.FileName
+			}
+			s.auditRecord(AuditInput{
+				UserID:     in.OwnerID,
+				Action:     repository.ActionShareCreate,
+				TargetType: "share",
+				TargetID:   row.ID,
+				IP:         in.IP,
+				Detail: map[string]any{
+					"share_id":  row.ID,
+					"file_id":   row.FileID,
+					"file_name": fileName,
+				},
+			})
 			return row, nil
 		}
 		if !isShareConflict(err) {
@@ -267,6 +307,7 @@ func (s *ShareService) checkShareRateLimit(ip string) error {
 
 // AccessShare 公开访问校验编排：限流 → 查码 → 过期/超次 → 密码 → 文件归属/文件夹伪装
 // 码错/取消/过期/超次/密码错/文件夹一律 repository.ErrShareNotFound（前端只见"链接无效"）
+// S4：成功后审计 share_access（C方案：匿名 UserID=0，target=share/ID，detail={share_id,file_id,file_name}，禁记 share_code 明文/哈希）
 func (s *ShareService) AccessShare(code, pw, ip string) (*model.FileShare, *model.File, error) {
 	code, err := normalizeShareCode(code)
 	if err != nil {
@@ -295,10 +336,64 @@ func (s *ShareService) AccessShare(code, pw, ip string) (*model.FileShare, *mode
 	if f.IsFolder == 1 {
 		return nil, nil, repository.ErrShareNotFound
 	}
+	// S4审计旁路：匿名访问 UserID=0，C方案不记 share_code
+	s.auditRecord(AuditInput{
+		UserID:     0,
+		Action:     repository.ActionShareAccess,
+		TargetType: "share",
+		TargetID:   share.ID,
+		IP:         ip,
+		Detail: map[string]any{
+			"share_id":  share.ID,
+			"file_id":   share.FileID,
+			"file_name": f.FileName,
+		},
+	})
 	return share, f, nil
 }
 
+// CancelShare 取消分享（S4审计 share_cancel；幂等由仓储保证，他人/不存在一律 ErrShareNotFound 伪装）
+// C方案：target=share/ID，detail={share_id,file_id,file_name}，禁记 share_code 明文/哈希；IP 经可变参透传
+func (s *ShareService) CancelShare(ownerID, shareID uint64, ips ...string) error {
+	if ownerID == 0 || shareID == 0 {
+		return fmt.Errorf("%w: 分享人与分享非法", ErrInvalidParams)
+	}
+	share, err := s.shares.FindByID(shareID, ownerID)
+	if err != nil {
+		return err
+	}
+	f, err := s.files.FindByIDAny(share.FileID)
+	if err != nil {
+		return ErrFileNotFound
+	}
+	if err := s.shares.CancelShare(shareID, ownerID); err != nil {
+		return err
+	}
+	fileName := ""
+	if f != nil {
+		fileName = f.FileName
+	}
+	ip := ""
+	if len(ips) > 0 {
+		ip = ips[0]
+	}
+	s.auditRecord(AuditInput{
+		UserID:     ownerID,
+		Action:     repository.ActionShareCancel,
+		TargetType: "share",
+		TargetID:   shareID,
+		IP:         ip,
+		Detail: map[string]any{
+			"share_id":  shareID,
+			"file_id":   share.FileID,
+			"file_name": fileName,
+		},
+	})
+	return nil
+}
+
 // DownloadShare 公开下载编排：AccessShare 全过 → 原子 +1（超次竞态转 404）→ Stat/Open 取流；调用方负责 Close
+// S4：AccessShare 内已记 share_access；此处再记 download（C方案：匿名 UserID=0，target=share/ID，禁记 share_code）
 func (s *ShareService) DownloadShare(code, pw, ip string) (*model.File, io.ReadCloser, int64, error) {
 	share, f, err := s.AccessShare(code, pw, ip)
 	if err != nil {
@@ -318,5 +413,17 @@ func (s *ShareService) DownloadShare(code, pw, ip string) (*model.File, io.ReadC
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("打开存储对象: %w", err)
 	}
+	s.auditRecord(AuditInput{
+		UserID:     0,
+		Action:     repository.ActionDownload,
+		TargetType: "share",
+		TargetID:   share.ID,
+		IP:         ip,
+		Detail: map[string]any{
+			"share_id":  share.ID,
+			"file_id":   share.FileID,
+			"file_name": f.FileName,
+		},
+	})
 	return f, rc, size, nil
 }

@@ -29,10 +29,12 @@ var ErrNotDownloadable = errors.New("文件夹不支持下载")
 
 // FileService 文件业务：薄层，归属判定留在仓储 SQL，只做参数规则
 // S3：细粒度读经 permission.Checker 集中判（handler 禁自判）；写/删仍收口到 Checker，拒绝一律 ErrFileNotFound 伪装
+// S4：审计旁路 WithAuditor（nil=不记，仅单测兼容；download 明细只记 file_id/file_name 快照）
 type FileService struct {
 	files   *repository.FileRepository
 	store   storage.Storage
 	checker *permission.Checker
+	auditor *AuditService
 }
 
 // NewFileService 构造注入文件仓储
@@ -44,6 +46,20 @@ func NewFileService(files *repository.FileRepository) *FileService {
 func (s *FileService) WithChecker(c *permission.Checker) *FileService {
 	s.checker = c
 	return s
+}
+
+// WithAuditor 注入审计旁路（S4；nil=不记，仅单测兼容）
+func (s *FileService) WithAuditor(a *AuditService) *FileService {
+	s.auditor = a
+	return s
+}
+
+// auditRecord 审计旁路统一入口：nil 审计直接跳过；Record 内部已 fail-open，调用方禁判错
+func (s *FileService) auditRecord(in AuditInput) {
+	if s == nil || s.auditor == nil {
+		return
+	}
+	_ = s.auditor.Record(in)
 }
 
 // loadForRead 读加载：owner 快路径 → 404 时若有 Checker 则经 FindByIDAny + Can(Read) 放行公共/同部门
@@ -245,7 +261,8 @@ func (s *FileService) Download(ownerID, id uint64) (*model.File, io.ReadCloser, 
 }
 
 // DownloadChecked 下载编排（S3 集中判：read；归属 → Stat 取真值 → Open 取流；调用方负责 Close）
-func (s *FileService) DownloadChecked(userID uint64, role, dept string, id uint64) (*model.File, io.ReadCloser, int64, error) {
+// S4：成功后审计 download（C方案：target=file/ID，detail={file_id,file_name}；旁路失败不阻断；IP 经可变参透传，缺省记 NULL）
+func (s *FileService) DownloadChecked(userID uint64, role, dept string, id uint64, ips ...string) (*model.File, io.ReadCloser, int64, error) {
 	if userID == 0 || id == 0 {
 		return nil, nil, 0, ErrInvalidParams
 	}
@@ -267,6 +284,21 @@ func (s *FileService) DownloadChecked(userID uint64, role, dept string, id uint6
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("打开存储对象: %w", err)
 	}
+	ip := ""
+	if len(ips) > 0 {
+		ip = ips[0]
+	}
+	s.auditRecord(AuditInput{
+		UserID:     userID,
+		Action:     repository.ActionDownload,
+		TargetType: "file",
+		TargetID:   f.ID,
+		IP:         ip,
+		Detail: map[string]any{
+			"file_id":   f.ID,
+			"file_name": f.FileName,
+		},
+	})
 	return f, rc, size, nil
 }
 

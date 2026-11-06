@@ -178,7 +178,7 @@ func (h *FileHandler) DownloadFile(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
 		return
 	}
-	f, rc, size, err := h.svc.DownloadChecked(c.GetUint64(middleware.CtxUserID), c.GetString(middleware.CtxRole), "", id)
+	f, rc, size, err := h.svc.DownloadChecked(c.GetUint64(middleware.CtxUserID), c.GetString(middleware.CtxRole), "", id, c.ClientIP())
 	if err != nil {
 		h.failFile(c, err)
 		return

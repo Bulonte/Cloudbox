@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -57,6 +58,7 @@ func (h *ShareHandler) CreateShare(c *gin.Context) {
 		Password:     req.Password,
 		ExpireAt:     exp,
 		MaxDownloads: req.MaxDownloads,
+		IP:           c.ClientIP(),
 	})
 	if err != nil {
 		h.failShare(c, err)
@@ -80,6 +82,39 @@ func (h *ShareHandler) CreateShare(c *gin.Context) {
 		ExpireAt:     expStr,
 		MaxDownloads: maxPtr,
 	})
+}
+
+// parseShareID 分享 ID 解析：十进制正整数，非法一律参错
+func parseShareID(s string) (uint64, error) {
+	id, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || id == 0 {
+		return 0, errors.New("分享ID非法")
+	}
+	return id, nil
+}
+
+// CancelShare DELETE /api/v1/shares/:id：需登录，仅 owner；幂等由仓储保证，他人/不存在一律 404/40004「分享不存在」防枚举
+// S4：成功后审计 share_cancel（C方案 detail 只记 share_id/file_id/file_name，禁记 share_code 明文/哈希）
+func (h *ShareHandler) CancelShare(c *gin.Context) {
+	id, err := parseShareID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	if err := h.svc.CancelShare(c.GetUint64(middleware.CtxUserID), id, c.ClientIP()); err != nil {
+		switch {
+		case errors.Is(err, service.ErrInvalidParams):
+			response.Fail(c, http.StatusBadRequest, codeInvalidParams, err.Error())
+		case errors.Is(err, repository.ErrShareNotFound),
+			errors.Is(err, service.ErrFileNotFound),
+			errors.Is(err, repository.ErrFileNotFound):
+			response.Fail(c, http.StatusNotFound, codeFileNotFound, "分享不存在")
+		default:
+			response.Fail(c, http.StatusInternalServerError, codeInternal, "服务器内部错误")
+		}
+		return
+	}
+	response.OK(c, nil)
 }
 
 // failShare 分享错误统一映射：参数 400/10001；限流 429/20005；

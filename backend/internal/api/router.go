@@ -34,11 +34,15 @@ func RegisterUserRoutes(r *gin.Engine, h *handler.UserHandler, mgr *jwt.Manager,
 }
 
 // RegisterAdminRoutes 注册管理演示路由组（S6：纵向越权回归，W9 真管理接口复用同一条链）
-func RegisterAdminRoutes(r *gin.Engine, mgr *jwt.Manager, checker middleware.RevokedChecker) {
+// S4：adminH 非空时挂载 GET /operation-logs（仅 admin/super_admin，AdminOnly 已拦；可变参兼容老单测）
+func RegisterAdminRoutes(r *gin.Engine, mgr *jwt.Manager, checker middleware.RevokedChecker, adminHs ...*handler.AdminHandler) {
 	admin := r.Group("/api/v1/admin", middleware.AuthRequired(mgr, checker), middleware.AdminOnly())
 	admin.GET("/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{"code": 0, "message": "success", "data": gin.H{"role": c.GetString(middleware.CtxRole)}})
 	})
+	if len(adminHs) > 0 && adminHs[0] != nil {
+		admin.GET("/operation-logs", adminHs[0].ListOperationLogs)
+	}
 }
 
 // RegisterUploadRoutes 注册分片上传路由组（W5-S1 会话初始化 + S2 单分片上传 + S3 合并收官 + S5 进度查询/取消，全挂 AuthRequired；细粒度归属由 Service 层判）
@@ -52,9 +56,11 @@ func RegisterUploadRoutes(r *gin.Engine, h *handler.ChunkHandler, mgr *jwt.Manag
 }
 
 // RegisterShareRoutes 注册分享路由组（W6-S1 创建需登录；S2 访问/下载公开链路另接）
+// S4：DELETE /:id 取消分享（需登录，仅 owner；成功后审计 share_cancel，C方案禁记 share_code）
 func RegisterShareRoutes(r *gin.Engine, h *handler.ShareHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	shares := r.Group("/api/v1/shares", middleware.AuthRequired(mgr, checker))
 	shares.POST("", h.CreateShare)
+	shares.DELETE("/:id", h.CancelShare)
 }
 
 // RegisterSharePublicRoutes 注册分享公开链路（S2：免登录；限流/伪装由 Service 层收口）

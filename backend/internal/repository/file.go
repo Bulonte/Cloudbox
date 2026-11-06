@@ -19,7 +19,7 @@ var ErrFileConflict = errors.New("同名文件已存在")
 var ErrInvalidParent = errors.New("父目录非法")
 
 // fileColumns 显列字段，禁 SELECT *（规范 §2.2.4）
-const fileColumns = "id,file_name,file_hash,file_size,file_path,mime_type,parent_id,owner_id,is_folder,is_deleted,category,confidence,created_at,updated_at"
+const fileColumns = "id,file_name,file_hash,file_size,file_path,mime_type,parent_id,owner_id,is_folder,is_deleted,visibility,department_id,category,confidence,created_at,updated_at"
 
 // FileRepository 文件表专用仓储：CRUD + 归属过滤（SQL 层带 owner_id，不查出再判）
 type FileRepository struct {
@@ -36,7 +36,11 @@ func NewFileRepository(db *gorm.DB) *FileRepository {
 }
 
 // CreateFile 创建文件/文件夹行；同 hash 冲突返回 ErrFileConflict（uk_hash）
+// S3：Visibility 为空按 private 回填（DB 默认只对裸 SQL 生效，GORM 显式插 "" 会覆盖）
 func (r *FileRepository) CreateFile(f *model.File) error {
+	if f.Visibility == "" {
+		f.Visibility = "private"
+	}
 	if err := r.db.Create(f).Error; err != nil {
 		if isUniqueViolation(err) {
 			return ErrFileConflict
@@ -47,9 +51,24 @@ func (r *FileRepository) CreateFile(f *model.File) error {
 }
 
 // FindByID 按主键查（带归属：owner 不一致/已删一律 ErrFileNotFound）
+// S3 保留：私有效果等同旧口径；部门/公开读由 Service 经 FindByIDAny + Checker 放行
 func (r *FileRepository) FindByID(id, ownerID uint64) (*model.File, error) {
 	var f model.File
 	err := r.db.Select(fileColumns).Where("id = ? AND owner_id = ? AND is_deleted = 0", id, ownerID).First(&f).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrFileNotFound
+		}
+		return nil, fmt.Errorf("查询文件: %w", err)
+	}
+	return &f, nil
+}
+
+// FindByIDAny 按主键查任意属主正常行（S3 权限地基：归属改由 permission.Checker 集中判，仓储只滤软删）
+// 无行/已删一律 ErrFileNotFound（不暴露存在性）；调用方必须再过 Checker，不可直返
+func (r *FileRepository) FindByIDAny(id uint64) (*model.File, error) {
+	var f model.File
+	err := r.db.Select(fileColumns).Where("id = ? AND is_deleted = 0", id).First(&f).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrFileNotFound

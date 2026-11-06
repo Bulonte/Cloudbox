@@ -97,16 +97,17 @@ func (h *FileHandler) UpdateFile(c *gin.Context) {
 		return
 	}
 	owner := c.GetUint64(middleware.CtxUserID)
+	role := c.GetString(middleware.CtxRole)
 	var f *model.File
 	if req.FileName != nil {
-		f, err = h.svc.Rename(owner, id, *req.FileName)
+		f, err = h.svc.RenameChecked(owner, role, "", id, *req.FileName)
 		if err != nil {
 			h.failFile(c, err)
 			return
 		}
 	}
 	if req.ParentID != nil {
-		f, err = h.svc.Move(owner, id, *req.ParentID)
+		f, err = h.svc.MoveChecked(owner, role, "", id, *req.ParentID)
 		if err != nil {
 			h.failFile(c, err)
 			return
@@ -115,14 +116,14 @@ func (h *FileHandler) UpdateFile(c *gin.Context) {
 	response.OK(c, ToFileResponse(f))
 }
 
-// DeleteFile DELETE /api/v1/files/:id：软删
+// DeleteFile DELETE /api/v1/files/:id：软删（S3 集中判：需 manage；越权伪装 404）
 func (h *FileHandler) DeleteFile(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
 		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
 		return
 	}
-	if err := h.svc.Delete(c.GetUint64(middleware.CtxUserID), id); err != nil {
+	if err := h.svc.DeleteChecked(c.GetUint64(middleware.CtxUserID), c.GetString(middleware.CtxRole), "", id); err != nil {
 		h.failFile(c, err)
 		return
 	}
@@ -170,14 +171,14 @@ func parseParentID(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
 }
 
-// DownloadFile GET /api/v1/files/:id/download：鉴权 → 归属 → 流式回写
+// DownloadFile GET /api/v1/files/:id/download：鉴权 → 集中判(read) → 流式回写
 func (h *FileHandler) DownloadFile(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
 		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
 		return
 	}
-	f, rc, size, err := h.svc.Download(c.GetUint64(middleware.CtxUserID), id)
+	f, rc, size, err := h.svc.DownloadChecked(c.GetUint64(middleware.CtxUserID), c.GetString(middleware.CtxRole), "", id, c.ClientIP())
 	if err != nil {
 		h.failFile(c, err)
 		return

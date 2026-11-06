@@ -13,6 +13,7 @@ import (
 	"cloudbox/internal/model"
 	"cloudbox/internal/pkg/password"
 	"cloudbox/internal/repository"
+	"cloudbox/internal/service/permission"
 	"cloudbox/internal/storage"
 )
 
@@ -33,8 +34,11 @@ const (
 )
 
 // CreateShareInput 创建分享入参：密码/过期/次数均可选
+// S3：Role/Dept 由 handler 透传（JWT role；dept 预留，用户表暂无部门字段时传空即按 fail-closed 收口）
 type CreateShareInput struct {
 	OwnerID      uint64
+	Role         string
+	Dept         string
 	FileID       uint64
 	Password     string
 	ExpireAt     *time.Time
@@ -42,6 +46,7 @@ type CreateShareInput struct {
 }
 
 // ShareService 分享业务：归属 SQL 层判，参数规则放这里
+// S3：建链收口到 permission.Checker（需 manage；拒绝一律 ErrFileNotFound 伪装）
 type ShareService struct {
 	shares    *repository.ShareRepository
 	files     *repository.FileRepository
@@ -49,6 +54,7 @@ type ShareService struct {
 	limiter   RedisStore
 	rateLimit int
 	codeGen   func() (string, error)
+	checker   *permission.Checker
 }
 
 // NewShareService 构造注入分享+文件仓储
@@ -65,6 +71,12 @@ func (s *ShareService) WithStorage(st storage.Storage) *ShareService {
 // WithLimiter 注入限流器（生产传 *redis.Client，原生满足 RedisStore；测试传内存 fake；nil=不限流仅单测用）
 func (s *ShareService) WithLimiter(rdb RedisStore) *ShareService {
 	s.limiter = rdb
+	return s
+}
+
+// WithChecker 注入集中判定器（S3 建链需 manage；nil=老归属口径，仅单测兼容）
+func (s *ShareService) WithChecker(c *permission.Checker) *ShareService {
+	s.checker = c
 	return s
 }
 
@@ -124,12 +136,24 @@ func hashSharePassword(pw string) (sql.NullString, error) {
 }
 
 // CreateShare 创建分享：归属校验 → 参数归一 → 碰撞重试；越权伪装 404
+// S3：有 Checker 时需 manage（所有者/超管天然过；public 读不给建链）；拒绝一律 ErrFileNotFound 伪装
 func (s *ShareService) CreateShare(in CreateShareInput) (*model.FileShare, error) {
 	if in.OwnerID == 0 || in.FileID == 0 {
 		return nil, fmt.Errorf("%w: 分享人与文件非法", ErrInvalidParams)
 	}
-	if _, err := s.files.FindByID(in.FileID, in.OwnerID); err != nil {
-		return nil, err
+	if s.checker == nil {
+		if _, err := s.files.FindByID(in.FileID, in.OwnerID); err != nil {
+			return nil, err
+		}
+	} else {
+		f, err := s.files.FindByIDAny(in.FileID)
+		if err != nil {
+			return nil, err
+		}
+		if !s.checker.Can(in.OwnerID, in.Role, in.Dept, f, permission.ActionManage) {
+			return nil, ErrFileNotFound
+		}
+		in.OwnerID = f.OwnerID
 	}
 	now := time.Now()
 	exp, err := normalizeExpiry(in.ExpireAt, now)

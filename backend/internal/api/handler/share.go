@@ -52,6 +52,7 @@ func (h *ShareHandler) CreateShare(c *gin.Context) {
 	}
 	row, err := h.svc.CreateShare(service.CreateShareInput{
 		OwnerID:      c.GetUint64(middleware.CtxUserID),
+		Role:         c.GetString(middleware.CtxRole),
 		FileID:       req.FileID,
 		Password:     req.Password,
 		ExpireAt:     exp,

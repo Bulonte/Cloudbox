@@ -2,16 +2,20 @@ package upload
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
+	"cloudbox/internal/service/smart"
 	"cloudbox/internal/storage"
 )
 
@@ -87,11 +91,14 @@ func (s *UploadService) InstantCheck(ownerID, parentID uint64, fileName, fileHas
 }
 
 // UploadService 单文件上传编排：S5 校验 → SHA256 → S4 落盘 → S1 落库 + S5 配额闭环
+// S8 追加 WithClassifier/WithFingerprints（分类 + 指纹旁路 enrichment，nil 即关闭，老单测兼容）
 type UploadService struct {
-	files     *repository.FileRepository
-	users     *repository.UserRepository
-	store     storage.Storage
-	maxSimple int64
+	files      *repository.FileRepository
+	users      *repository.UserRepository
+	store      storage.Storage
+	maxSimple  int64
+	classifier smart.Classifier
+	fps        *repository.FingerprintRepository
 }
 
 // NewUploadService 构造注入；maxSimple<=0 回退 MaxSimpleUploadSize
@@ -105,6 +112,18 @@ func NewUploadService(files *repository.FileRepository, store storage.Storage, m
 // WithUsers 注入用户仓储（S5 配额预检+原子扣减用；nil 即无配额模式，老单测兼容）
 func (s *UploadService) WithUsers(u *repository.UserRepository) *UploadService {
 	s.users = u
+	return s
+}
+
+// WithClassifier 注入分类器（S8 分类旁路；nil 即关闭，老单测兼容）
+func (s *UploadService) WithClassifier(c smart.Classifier) *UploadService {
+	s.classifier = c
+	return s
+}
+
+// WithFingerprints 注入指纹仓储（S8 指纹旁路；nil 即关闭，老单测兼容）
+func (s *UploadService) WithFingerprints(fps *repository.FingerprintRepository) *UploadService {
+	s.fps = fps
 	return s
 }
 
@@ -197,6 +216,7 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 		return nil, err
 	} else if existing != nil {
 		if _, ok := s.store.Exists(hash); ok {
+			s.enrich(existing, data)
 			return existing, nil
 		}
 	}
@@ -235,12 +255,48 @@ func (s *UploadService) Upload(ownerID, parentID uint64, fileName string, src io
 		}
 		if errors.Is(err, ErrFileConflict) {
 			if existing, rerr := s.files.FindByHash(hash, ownerID); rerr == nil && existing != nil {
+				s.enrich(existing, data)
 				return existing, nil
 			}
 		}
 		return nil, err
 	}
+	s.enrich(f, data)
 	return f, nil
+}
+
+// enrich S8 分类 + 指纹旁路：落库成功后才调，全吞错（fail-open），永不阻断上传
+func (s *UploadService) enrich(f *model.File, data []byte) {
+	if s.classifier == nil && s.fps == nil {
+		return
+	}
+	text := smart.TextSnippet(f.FileName, data, f.MimeType)
+	combined := strings.TrimSpace(f.FileName + " " + text)
+	cat := smart.ClassifyWithFallback(s.classifier, f.FileName, combined)
+	_ = s.files.UpdateByID(f.ID, map[string]any{"category": cat.Category.String(), "confidence": cat.Confidence})
+	f.Category = sql.NullString{String: cat.Category.String(), Valid: true}
+	f.Confidence = sql.NullFloat64{Float64: cat.Confidence, Valid: true}
+	if s.fps == nil {
+		return
+	}
+	algo := smart.PickAlgorithm(f.FileName, f.MimeType)
+	var hexStr string
+	if algo == "phash" {
+		fp, err := smart.PHashFromBytes(data)
+		if err != nil || fp == 0 {
+			return
+		}
+		hexStr = smart.EncodePHash(fp)
+	} else {
+		fp := smart.SimHashWithSegmenter(combined, nil)
+		if fp == 0 {
+			return
+		}
+		hexStr = smart.EncodeSimHash(fp)
+	}
+	if err := s.fps.Upsert(context.Background(), f.ID, algo, hexStr); err != nil {
+		slog.Warn("指纹落库失败，已跳过", "file_id", f.ID, "algo", algo)
+	}
 }
 
 // checkParent 父目录校验：0=根直接过；否则须同人所有且为文件夹

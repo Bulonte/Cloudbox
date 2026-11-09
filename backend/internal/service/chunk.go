@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +18,7 @@ import (
 
 	"cloudbox/internal/model"
 	"cloudbox/internal/repository"
+	"cloudbox/internal/service/smart"
 	"cloudbox/internal/service/upload"
 	"cloudbox/internal/storage"
 )
@@ -58,12 +61,15 @@ const (
 // ChunkService 分片会话业务：编排会话签发与分片落盘；S2 落 .part 暂存，事务为单行 UPSERT
 // S3 合并需 WithStorage + WithTmpDir 双注入（测试/生产 main.go 均显式注入）
 // S5 追加 WithLocker（合并互斥，nil 即无锁模式）
+// S8 追加 WithClassifier/WithFingerprints（分类 + 指纹旁路 enrichment，nil 即关闭）
 type ChunkService struct {
 	files       *repository.FileRepository
 	users       *repository.UserRepository
 	chunks      *repository.ChunkRepository
 	store       storage.Storage
 	locker      MergeLocker
+	classifier  smart.Classifier
+	fps         *repository.FingerprintRepository
 	maxFileSize uint64
 	maxChunks   uint32
 	tmpDir      string
@@ -116,6 +122,18 @@ func (s *ChunkService) WithStorage(st storage.Storage) *ChunkService {
 // WithLocker 注入合并互斥锁（S5 生产传 *redis.Client；nil 即无锁模式，单测默认）
 func (s *ChunkService) WithLocker(l MergeLocker) *ChunkService {
 	s.locker = l
+	return s
+}
+
+// WithClassifier 注入分类器（S8 分类旁路；nil 即关闭，老单测兼容）
+func (s *ChunkService) WithClassifier(c smart.Classifier) *ChunkService {
+	s.classifier = c
+	return s
+}
+
+// WithFingerprints 注入指纹仓储（S8 指纹旁路；nil 即关闭，老单测兼容）
+func (s *ChunkService) WithFingerprints(fps *repository.FingerprintRepository) *ChunkService {
+	s.fps = fps
 	return s
 }
 
@@ -440,8 +458,7 @@ func (s *ChunkService) cleanupSession(uploadID string) {
 	_ = os.RemoveAll(filepath.Join(s.tmpRoot(), filepath.FromSlash(strings.TrimSpace(uploadID))))
 }
 
-// CompleteUpload 分片合并：抢锁 → 会话归属 → parent/幂等 → 齐套/等大/sum → 按序合并+SHA →
-// 三层校验 → Store 复用 → 配额原子扣 → file 落库（冲突回补）→ Cancel + 清盘；拿锁失败转 ErrMergeInProgress
+// CompleteUpload 分片合并编排（S8 瘦身为 30 行编排；拿锁失败转 ErrMergeInProgress）
 func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileName string) (*model.File, error) {
 	if ownerID == 0 {
 		return nil, fmt.Errorf("%w: 用户非法", ErrInvalidParams)
@@ -456,41 +473,74 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 	if s.store == nil {
 		return nil, fmt.Errorf("存储未注入")
 	}
-	// S5 合并互斥：同 uploadID 串行化，防双扣双合；Redis 宕降级放行靠 DB 兜底
 	release, err := s.acquireMerge(uploadID)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	sess, err := s.chunks.FindSession(uploadID, ownerID)
+	sess, canonicalHash, existing, err := s.checkReady(ownerID, parentID, uploadID)
 	if err != nil {
 		return nil, err
 	}
-	canonicalHash := strings.ToLower(strings.TrimSpace(sess.FileHash))
-	n := sess.TotalChunks
-	cs := sess.ChunkSize
-	if err := s.checkParent(ownerID, parentID); err != nil {
+	if existing != nil {
+		s.enrichFile(existing, "")
+		return existing, nil
+	}
+	sum, err := s.verifyParts(ownerID, uploadID, sess)
+	if err != nil {
 		return nil, err
 	}
-	// 幂等短路：同人同 hash 已有正常行且存储对象仍在，直接 Cancel + 清盘返回既有行，不二次扣配额
-	// blob 已丢时不短路，落到正常合并流程重建自愈；已取消会话同样走幂等，无行才 404
-	if f, err := s.files.FindByHash(canonicalHash, ownerID); err != nil {
+	merged, err := s.mergeFile(uploadID, sess)
+	if err != nil {
 		return nil, err
+	}
+	ext, mime, _, err := s.sniffMerged(merged, fileName)
+	if err != nil {
+		return nil, err
+	}
+	f, err := s.verifyAndStore(ownerID, parentID, uploadID, fileName, merged, sum, ext, mime, canonicalHash)
+	if err != nil {
+		return nil, err
+	}
+	s.enrichFile(f, merged)
+	_ = s.chunks.Cancel(uploadID, ownerID)
+	s.cleanupSession(uploadID)
+	_ = os.Remove(merged)
+	return f, nil
+}
+
+// checkReady 会话归属 + parent + 幂等短路（命中既有行时 Cancel + 清盘并回 existing）
+func (s *ChunkService) checkReady(ownerID, parentID uint64, uploadID string) (*model.UploadChunk, string, *model.File, error) {
+	sess, err := s.chunks.FindSession(uploadID, ownerID)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	canonicalHash := strings.ToLower(strings.TrimSpace(sess.FileHash))
+	if err := s.checkParent(ownerID, parentID); err != nil {
+		return nil, "", nil, err
+	}
+	if f, err := s.files.FindByHash(canonicalHash, ownerID); err != nil {
+		return nil, "", nil, err
 	} else if f != nil {
 		if _, ok := s.store.Exists(canonicalHash); ok {
 			_ = s.chunks.Cancel(uploadID, ownerID)
 			s.cleanupSession(uploadID)
-			return f, nil
+			return sess, canonicalHash, f, nil
 		}
 	}
 	if sess.Status == 2 {
-		return nil, ErrChunkNotFound
+		return nil, "", nil, ErrChunkNotFound
 	}
-	// 大小写兼容：会话存原串，实际合并比对 EqualFold
-	// 齐套校验：占位行除外须满 n 行
+	return sess, canonicalHash, nil, nil
+}
+
+// verifyParts 齐套 + 逐片 Stat（中间片等大/末片合法）+ sum 区间闭环
+func (s *ChunkService) verifyParts(ownerID uint64, uploadID string, sess *model.UploadChunk) (uint64, error) {
+	n := sess.TotalChunks
+	cs := sess.ChunkSize
 	rows, err := s.chunks.FindByUploadID(uploadID, ownerID)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	var cnt uint32
 	for _, r := range rows {
@@ -500,55 +550,67 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 		cnt++
 	}
 	if cnt != n || n == 0 {
-		return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+		return 0, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
 	}
-	// 逐片 Stat：缺盘/缺行/中间片不等大/末片越界一律参错
 	var sum uint64
 	for i := uint32(0); i < n; i++ {
 		if _, err := s.chunks.FindChunk(uploadID, ownerID, i); err != nil {
-			return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+			return 0, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
 		}
-		abs, _, err := s.partAbsPath(uploadID, i)
+		sz, err := s.statPart(uploadID, i, n, cs)
 		if err != nil {
-			return nil, err
-		}
-		fi, err := os.Stat(abs)
-		if err != nil {
-			return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
-		}
-		sz := uint64(fi.Size())
-		if i < n-1 {
-			if sz != cs {
-				return nil, fmt.Errorf("%w: 分片大小不一致", ErrInvalidParams)
-			}
-		} else {
-			if sz == 0 || sz > cs {
-				return nil, fmt.Errorf("%w: 末片大小非法", ErrInvalidParams)
-			}
+			return 0, err
 		}
 		sum += sz
 	}
-	// sum 区间闭环：(n-1)*cs < sum ≤ n*cs 且 sum ≤ maxFileSize（S1 没存 total_size 的替代约束）
 	if n > 0 {
 		lo := uint64(n-1) * cs
 		if sum <= lo || sum > uint64(n)*cs {
-			return nil, fmt.Errorf("%w: 分片总和非法", ErrInvalidParams)
+			return 0, fmt.Errorf("%w: 分片总和非法", ErrInvalidParams)
 		}
 	}
 	if sum == 0 || sum > s.maxFileSize {
-		return nil, fmt.Errorf("%w: 文件大小非法", ErrInvalidParams)
+		return 0, fmt.Errorf("%w: 文件大小非法", ErrInvalidParams)
 	}
-	// 按序合并：边读边 hash，全程流式禁 ReadAll；O_EXCL 防锁过期后双 complete 交错 O_TRUNC 写坏同一 .merged
+	return sum, nil
+}
+
+// statPart 单片 Stat + 大小合法性（中间片须等大，末片 (0,cs]）
+func (s *ChunkService) statPart(uploadID string, i, n uint32, cs uint64) (uint64, error) {
+	abs, _, err := s.partAbsPath(uploadID, i)
+	if err != nil {
+		return 0, err
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return 0, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+	}
+	sz := uint64(fi.Size())
+	if i < n-1 {
+		if sz != cs {
+			return 0, fmt.Errorf("%w: 分片大小不一致", ErrInvalidParams)
+		}
+	} else {
+		if sz == 0 || sz > cs {
+			return 0, fmt.Errorf("%w: 末片大小非法", ErrInvalidParams)
+		}
+	}
+	return sz, nil
+}
+
+// mergeFile 按序合并：边读边 hash，全程流式禁 ReadAll；O_EXCL 防交错写坏 .merged
+func (s *ChunkService) mergeFile(uploadID string, sess *model.UploadChunk) (string, error) {
+	n := sess.TotalChunks
 	merged, err := s.mergedTmpPath(uploadID)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	out, err := os.OpenFile(merged, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if os.IsExist(err) {
-			return nil, ErrMergeInProgress
+			return "", ErrMergeInProgress
 		}
-		return nil, fmt.Errorf("建合并文件: %w", err)
+		return "", fmt.Errorf("建合并文件: %w", err)
 	}
 	h := sha256.New()
 	mw := io.MultiWriter(out, h)
@@ -557,41 +619,45 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 		if err != nil {
 			_ = out.Close()
 			_ = os.Remove(merged)
-			return nil, err
+			return "", err
 		}
 		in, err := os.Open(abs)
 		if err != nil {
 			_ = out.Close()
 			_ = os.Remove(merged)
-			return nil, fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
+			return "", fmt.Errorf("%w: 分片缺失", ErrInvalidParams)
 		}
 		if _, err := io.CopyBuffer(mw, in, make([]byte, 32*1024)); err != nil {
 			_ = in.Close()
 			_ = out.Close()
 			_ = os.Remove(merged)
-			return nil, fmt.Errorf("合并分片: %w", err)
+			return "", fmt.Errorf("合并分片: %w", err)
 		}
 		_ = in.Close()
 	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(merged)
-		return nil, fmt.Errorf("关闭合并文件: %w", err)
+		return "", fmt.Errorf("关闭合并文件: %w", err)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, sess.FileHash) {
 		_ = os.Remove(merged)
-		return nil, fmt.Errorf("%w: 文件哈希不一致", ErrInvalidParams)
+		return "", fmt.Errorf("%w: 文件哈希不一致", ErrInvalidParams)
 	}
-	// 三层校验：扩展名 + MIME/魔数（复用 upload 包，与 W4 单文件同口径）
+	return merged, nil
+}
+
+// sniffMerged 三层校验：扩展名 + MIME/魔数（复用 upload 包），返回 ext/mime/head
+func (s *ChunkService) sniffMerged(merged, fileName string) (string, string, []byte, error) {
 	ext, err := upload.ValidateExt(fileName)
 	if err != nil {
 		_ = os.Remove(merged)
-		return nil, fmt.Errorf("%w: %v", ErrInvalidParams, err)
+		return "", "", nil, fmt.Errorf("%w: %v", ErrInvalidParams, err)
 	}
 	head := make([]byte, upload.SniffLen)
 	mf, err := os.Open(merged)
 	if err != nil {
 		_ = os.Remove(merged)
-		return nil, fmt.Errorf("打开合并文件: %w", err)
+		return "", "", nil, fmt.Errorf("打开合并文件: %w", err)
 	}
 	hn, _ := io.ReadFull(mf, head)
 	_ = mf.Close()
@@ -599,9 +665,14 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 	mime, err := upload.SniffAndCheck(head, ext)
 	if err != nil {
 		_ = os.Remove(merged)
-		return nil, fmt.Errorf("%w: %v", ErrInvalidParams, err)
+		return "", "", nil, fmt.Errorf("%w: %v", ErrInvalidParams, err)
 	}
-	// 快拒：读配额做一次只读预检，省 Store 调用
+	return ext, mime, head, nil
+}
+
+// verifyAndStore 配额预检 + Store 复用 + 原子扣 + file 落库（冲突回补）
+func (s *ChunkService) verifyAndStore(ownerID, parentID uint64, uploadID, fileName, merged string, sum uint64, ext, mime, canonicalHash string) (*model.File, error) {
+	_ = ext
 	if err := s.checkQuota(ownerID, sum); err != nil {
 		_ = os.Remove(merged)
 		return nil, err
@@ -637,7 +708,6 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 		IsFolder: 0,
 	}
 	if err := s.files.CreateFile(f); err != nil {
-		// 冲突/其他错一律回补配额；冲突额外 Cancel + 清盘转 S4 秒传
 		_ = s.users.DecrUsedBytes(ownerID, sum)
 		_ = os.Remove(merged)
 		if errors.Is(err, repository.ErrFileConflict) {
@@ -647,10 +717,105 @@ func (s *ChunkService) CompleteUpload(ownerID, parentID uint64, uploadID, fileNa
 		}
 		return nil, err
 	}
-	_ = s.chunks.Cancel(uploadID, ownerID)
-	s.cleanupSession(uploadID)
-	_ = os.Remove(merged)
 	return f, nil
+}
+
+// enrichHeadLen 分片 enrichment 头采样（64KB，二进制截断足够，5GB 安全）
+const enrichHeadLen = 64 << 10
+
+// enrichFile S8 分类 + 指纹旁路：全吞错（fail-open），merged=="" 时从存储重读
+// 不删 merged / 不 Cancel：清盘归 CompleteUpload 编排统一收尾
+func (s *ChunkService) enrichFile(f *model.File, merged string) {
+	if s.classifier == nil && s.fps == nil {
+		return
+	}
+	head := s.enrichHead(f, merged)
+	text := smart.TextSnippet(f.FileName, head, f.MimeType)
+	combined := strings.TrimSpace(f.FileName + " " + text)
+	cat := smart.ClassifyWithFallback(s.classifier, f.FileName, combined)
+	_ = s.files.UpdateByID(f.ID, map[string]any{"category": cat.Category.String(), "confidence": cat.Confidence})
+	f.Category = sql.NullString{String: cat.Category.String(), Valid: true}
+	f.Confidence = sql.NullFloat64{Float64: cat.Confidence, Valid: true}
+	if s.fps != nil {
+		s.enrichFingerprint(f, merged, combined)
+	}
+}
+
+// enrichHead 取 head：merged 在盘读盘，否则从存储重读，失败回空
+func (s *ChunkService) enrichHead(f *model.File, merged string) []byte {
+	if merged != "" {
+		if b := headOf(merged, enrichHeadLen); len(b) > 0 {
+			return b
+		}
+	}
+	rc, err := s.store.Open(f.FilePath)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rc.Close() }()
+	buf := make([]byte, enrichHeadLen)
+	n, _ := io.ReadFull(rc, buf)
+	return buf[:n]
+}
+
+// enrichFingerprint 指纹旁路：phash 读流解码，simhash 用 combined；0 指纹跳过
+func (s *ChunkService) enrichFingerprint(f *model.File, merged, combined string) {
+	algo := smart.PickAlgorithm(f.FileName, f.MimeType)
+	var hexStr string
+	if algo == "phash" {
+		var fp uint64
+		var err error
+		if merged != "" {
+			fp, err = s.phashOfMerged(merged)
+		} else {
+			fp, err = s.phashOfStored(f)
+		}
+		if err != nil || fp == 0 {
+			return
+		}
+		hexStr = smart.EncodePHash(fp)
+	} else {
+		fp := smart.SimHashWithSegmenter(combined, nil)
+		if fp == 0 {
+			return
+		}
+		hexStr = smart.EncodeSimHash(fp)
+	}
+	if err := s.fps.Upsert(context.Background(), f.ID, algo, hexStr); err != nil {
+		slog.Warn("指纹落库失败，已跳过", "file_id", f.ID, "algo", algo)
+	}
+}
+
+// phashOfMerged 读 merged 盘文件算 pHash
+func (s *ChunkService) phashOfMerged(merged string) (uint64, error) {
+	in, err := os.Open(merged)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = in.Close() }()
+	return smart.PHashFromReader(in)
+}
+
+// phashOfStored 从存储重读算 pHash（幂等短路行无 merged 时用）
+func (s *ChunkService) phashOfStored(f *model.File) (uint64, error) {
+	rc, err := s.store.Open(f.FilePath)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rc.Close() }()
+	return smart.PHashFromReader(rc)
+}
+
+// headOf 读文件前 limit 字节（fail-open：失败回 nil）
+func headOf(path string, limit int) []byte {
+	in, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = in.Close() }()
+	buf := make([]byte, limit)
+	n, _ := io.ReadFull(in, buf)
+	return buf[:n]
 }
 
 // InitUpload 会话签发主流程：V1–V5 → parent → quota → UUID 落占位行；hash 已存在也照常建会话

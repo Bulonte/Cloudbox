@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service"
 	"cloudbox/internal/service/permission"
+	"cloudbox/internal/service/smart"
 	"cloudbox/internal/service/upload"
 	"cloudbox/internal/storage"
 )
@@ -60,7 +63,16 @@ func main() {
 		panic(err)
 	}
 	fh := handler.NewFileHandler(service.NewFileService(fileRepo).WithStorage(st).WithChecker(permission.NewChecker()).WithAuditor(auditSvc))
-	fh.WithUploader(upload.NewUploadService(fileRepo, st, cfg.Upload.MaxSimpleSize).WithUsers(repository.NewUserRepository(db)))
+	// W6-S8：分类器 + 指纹旁路注入（fail-open：规则表空/加载失败回退内置最小表，不阻断启动）
+	smart.Init()
+	kws, lerr := smart.NewRuleLoader(repository.NewCategoryKeywordRepository(db)).Load(context.Background())
+	if lerr != nil {
+		slog.Warn("分类规则加载失败，已回退内置表", "err", lerr)
+		kws = nil
+	}
+	classifier := smart.NewRuleClassifierWithKeywords(kws)
+	fpsRepo := repository.NewFingerprintRepository(db)
+	fh.WithUploader(upload.NewUploadService(fileRepo, st, cfg.Upload.MaxSimpleSize).WithUsers(repository.NewUserRepository(db)).WithClassifier(classifier).WithFingerprints(fpsRepo))
 	api.RegisterFileRoutes(r, fh, jwtMgr, checker)
 	// W5-S1：分片会话初始化路由接线（init 只建占位行，不碰 storage/Redis）
 	// W5-S2：分片暂存根 .tmp/chunks，启动建目录失败直接 panic（与 storage 同策略）
@@ -68,7 +80,7 @@ func main() {
 	if err := os.MkdirAll(chunkTmp, 0o755); err != nil {
 		panic(err)
 	}
-	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp).WithStorage(st).WithLocker(rdb)
+	chunkSvc := service.NewChunkService(fileRepo, repository.NewUserRepository(db), repository.NewChunkRepository(db), cfg.Upload.MaxFileSize, cfg.Upload.MaxChunks).WithTmpDir(chunkTmp).WithStorage(st).WithLocker(rdb).WithClassifier(classifier).WithFingerprints(fpsRepo)
 	api.RegisterUploadRoutes(r, handler.NewChunkHandler(chunkSvc), jwtMgr, checker)
 	// W6-S1：分享生成路由接线（POST /api/v1/shares，需登录；S2 公开链路另接）
 	shareSvc := service.NewShareService(repository.NewShareRepository(db), fileRepo).WithStorage(st).WithLimiter(rdb).WithChecker(permission.NewChecker()).WithAuditor(auditSvc)

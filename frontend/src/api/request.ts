@@ -23,6 +23,25 @@ export function getToken(): string {
   return memToken
 }
 
+const REFRESH_KEY = 'cb_refresh'
+
+let memRefresh: string = sessionStorage.getItem(REFRESH_KEY) ?? ''
+
+/** 保存 RefreshToken（内存 + sessionStorage 双写，禁 localStorage） */
+export function setRefresh(t: string): void {
+  memRefresh = t
+  if (t) {
+    sessionStorage.setItem(REFRESH_KEY, t)
+  } else {
+    sessionStorage.removeItem(REFRESH_KEY)
+  }
+}
+
+/** 读取 RefreshToken（只读内存） */
+export function getRefresh(): string {
+  return memRefresh
+}
+
 interface BizBody {
   message?: string
   code?: number

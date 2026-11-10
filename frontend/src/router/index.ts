@@ -5,8 +5,8 @@ import { getToken } from '@/api/request'
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/login', component: () => import('@/views/Placeholder.vue') },
-    { path: '/register', component: () => import('@/views/Placeholder.vue') },
+    { path: '/login', component: () => import('@/views/Login.vue') },
+    { path: '/register', component: () => import('@/views/Register.vue') },
     { path: '/', redirect: '/files' },
     { path: '/files', component: () => import('@/views/Placeholder.vue') },
     { path: '/:pathMatch(.*)*', component: () => import('@/views/NotFound.vue') },

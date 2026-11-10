@@ -1,0 +1,73 @@
+/* CloudBox 前端设计 Token（Notion 风格冻结 · W7-S1） */
+/* 来源：awesome-design-md/references/design-md/notion/DESIGN.md（灵感复刻，非官方套件） */
+/* 规则：组件只引用 --cb-* 变量，禁止硬编码 hex；紫色只做主 CTA，不做正文大背景 */
+
+:root {
+  /* 主色：只做主 CTA */
+  --cb-primary: #5645d4;
+  --cb-primary-pressed: #4534b3;
+  --cb-primary-deep: #3a2a99;
+  --cb-on-primary: #ffffff;
+
+  /* 链接蓝：只做行内链接，与主紫不混用 */
+  --cb-link: #0075de;
+  --cb-link-pressed: #005bab;
+
+  /* 画布与表面 */
+  --cb-canvas: #ffffff;
+  --cb-surface: #f6f5f4;
+  --cb-surface-soft: #fafaf9;
+  --cb-hairline: #e5e3df;
+  --cb-hairline-soft: #ede9e4;
+  --cb-hairline-strong: #c8c4be;
+
+  /* 四级文本 */
+  --cb-ink: #1a1a1a;
+  --cb-charcoal: #37352f;
+  --cb-slate: #5d5b54;
+  --cb-steel: #787671;
+  --cb-muted: #bbb8b1;
+
+  /* 语义色 */
+  --cb-success: #1aae39;
+  --cb-warning: #dd5b00;
+  --cb-error: #e03131;
+
+  /* 分类徽标粉彩（9 大类轮换） */
+  --cb-tag-purple-bg: #e6e0f5;
+  --cb-tag-purple-fg: #391c57;
+  --cb-tag-orange-bg: #ffe8d4;
+  --cb-tag-orange-fg: #793400;
+  --cb-tag-green-bg: #d9f3e1;
+  --cb-tag-green-fg: #1aae39;
+
+  /* 圆角：按钮/输入 8px 矩形（禁全 pill），卡片 12px */
+  --cb-radius-sm: 6px;
+  --cb-radius-md: 8px;
+  --cb-radius-lg: 12px;
+
+  /* 动效：Gaps 未给 token，统一 150-200ms ease，不编造 */
+  --cb-transition: 180ms ease;
+
+  /* Element Plus 主题覆盖 */
+  --el-color-primary: var(--cb-primary);
+  --el-border-radius-base: var(--cb-radius-md);
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--cb-canvas);
+  color: var(--cb-ink);
+  font-family: 'Notion Sans', Inter, -apple-system, system-ui, 'Segoe UI',
+    'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* 全局过渡 */
+button,
+a {
+  transition:
+    background-color var(--cb-transition),
+    color var(--cb-transition),
+    border-color var(--cb-transition);
+}

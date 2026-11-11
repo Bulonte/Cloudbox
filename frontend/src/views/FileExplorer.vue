@@ -5,6 +5,7 @@ import { fileApi, type FileItem } from '@/api/file'
 import { useFileStore } from '@/store/file'
 import { validFileName } from '@/utils/format'
 import FileList from '@/components/FileList.vue'
+import Uploader from '@/components/Uploader.vue'
 
 // S4 文件浏览器：容器管数据 + 弹窗，列表渲染下沉 FileList；成功刷列表，失败由 request 统一弹窗
 const store = useFileStore()
@@ -99,12 +100,15 @@ async function onPageChange(p: number): Promise<void> {
           >{{ c.name }}</span>
         </el-breadcrumb-item>
       </el-breadcrumb>
-      <el-button
-        type="primary"
-        @click="openCreate"
-      >
-        新建文件夹
-      </el-button>
+      <div class="explorer-actions">
+        <Uploader />
+        <el-button
+          type="primary"
+          @click="openCreate"
+        >
+          新建文件夹
+        </el-button>
+      </div>
     </div>
 
     <FileList
@@ -190,6 +194,12 @@ async function onPageChange(p: number): Promise<void> {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+}
+
+.explorer-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .crumb {

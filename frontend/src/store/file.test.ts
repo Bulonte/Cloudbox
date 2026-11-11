@@ -9,6 +9,7 @@ vi.mock('@/api/file', () => ({
     createFolder: vi.fn(),
     update: vi.fn(),
     remove: vi.fn(),
+    upload: vi.fn(),
   },
 }))
 
@@ -65,5 +66,33 @@ describe('S4 file store 面包屑 + 越界兜底', () => {
     await store.fetchList()
     expect(store.page).toBe(1)
     expect(store.items.length).toBe(1)
+  })
+})
+
+describe('S5 file store 上传进度 + 刷列表', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('成功后 uploading 回 false 且刷列表', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mocked.upload.mockResolvedValue(item(9, 'a.pdf'))
+    mocked.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(9, 'a.pdf')] })
+    const store = useFileStore()
+    await store.uploadOne(new File(['x'], 'a.pdf'))
+    expect(mocked.upload).toHaveBeenCalledOnce()
+    expect(store.uploading).toBe(false)
+    expect(store.items.length).toBe(1)
+  })
+
+  it('失败时 uploading 照样回 false 且 items 不变', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mocked.upload.mockRejectedValue(new Error('400'))
+    mocked.list.mockResolvedValue({ total: 0, page: 1, pageSize: 20, items: [] })
+    const store = useFileStore()
+    await expect(store.uploadOne(new File(['x'], 'a.pdf'))).rejects.toThrow('400')
+    expect(store.uploading).toBe(false)
+    expect(store.items).toEqual([])
   })
 })

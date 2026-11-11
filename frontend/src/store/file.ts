@@ -15,6 +15,8 @@ export const useFileStore = defineStore('file', () => {
   const pageSize = ref(20)
   const parentId = ref(0)
   const loading = ref(false)
+  const uploading = ref(false)
+  const progress = ref(0)
   const crumbs = ref<Crumb[]>([{ id: 0, name: '根目录' }])
 
   async function fetchList(): Promise<void> {
@@ -61,14 +63,30 @@ export const useFileStore = defineStore('file', () => {
     await fetchList()
   }
 
+  // S5 简单上传：进度经回调回写，成功刷列表；失败由 request 统一弹窗，uploading 必回 false
+  async function uploadOne(f: File): Promise<void> {
+    uploading.value = true
+    progress.value = 0
+    try {
+      await fileApi.upload(f, parentId.value, (p) => {
+        progress.value = p
+      })
+      await fetchList()
+    } finally {
+      uploading.value = false
+    }
+  }
+
   function reset(): void {
     items.value = []
     total.value = 0
     page.value = 1
     pageSize.value = 20
     parentId.value = 0
+    uploading.value = false
+    progress.value = 0
     crumbs.value = [{ id: 0, name: '根目录' }]
   }
 
-  return { items, total, page, pageSize, parentId, loading, crumbs, fetchList, enterFolder, goCrumb, refresh, reset }
+  return { items, total, page, pageSize, parentId, loading, uploading, progress, crumbs, fetchList, enterFolder, goCrumb, refresh, uploadOne, reset }
 })

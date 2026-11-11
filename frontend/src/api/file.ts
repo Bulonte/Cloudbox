@@ -100,4 +100,19 @@ export const fileApi = {
   async remove(id: number): Promise<void> {
     await request.delete<Biz<null>>(`/files/${String(id)}`)
   },
+  // S5 简单上传：multipart file + parent_id 文本字段；axios 自动带 boundary，勿手写 Content-Type
+  async upload(f: File, parentId: number, onProgress?: (pct: number) => void): Promise<FileItem> {
+    const fd = new FormData()
+    fd.append('file', f, f.name)
+    fd.append('parent_id', String(parentId))
+    const { data } = await request.post<Biz<RawFile>>('/files', fd, {
+      onUploadProgress: (e) => {
+        if (!e.total) {
+          return
+        }
+        onProgress?.(Math.round((e.loaded / e.total) * 100))
+      },
+    })
+    return toFile(data.data)
+  },
 }

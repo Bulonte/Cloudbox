@@ -12,8 +12,8 @@ const router = createRouter({
       component: () => import('@/views/Layout.vue'),
       children: [
         { path: '', redirect: '/files' },
-        // S4 替换为 FileExplorer，真列表在 W7-7.5 落地
-        { path: 'files', component: () => import('@/views/Placeholder.vue') },
+        // S4 真列表落地：FileExplorer 容器 + FileList 纯展示
+        { path: 'files', component: () => import('@/views/FileExplorer.vue') },
       ],
     },
     { path: '/:pathMatch(.*)*', component: () => import('@/views/NotFound.vue') },

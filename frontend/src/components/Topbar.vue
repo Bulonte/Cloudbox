@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useFileStore } from '@/store/file'
 import { useUserStore } from '@/store/user'
 
 // S3 顶栏：只做展示 + 登出，改密页 W8 再做
@@ -10,8 +11,10 @@ const store = useUserStore()
 const displayName = computed(() => store.user?.username ?? '加载中')
 
 async function onLogout(): Promise<void> {
-  // store.logout 已先清本地（后端 500 也不回滚），此处只负责跳转
+  // store.logout 已先清本地（后端 500 也不回滚），此处只负责跳转；
+  // S5 收官：顺手清文件 store，避免换号残留旧目录
   await store.logout()
+  useFileStore().reset()
   await router.push('/login')
 }
 </script>

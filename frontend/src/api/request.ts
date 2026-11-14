@@ -64,15 +64,17 @@ request.interceptors.request.use((cfg) => {
 request.interceptors.response.use(
   (resp) => resp,
   (err: AxiosError<BizBody>) => {
-    const status = err.response?.status
-    if (status === 401) {
+    const msg = err.response?.data?.message ?? '请求失败'
+    // 统一错误提示，禁止各组件重复弹窗；登录失败文案以后端为准，不区分原因
+    // 401 也要上屏（此前提前 return 把提示吞了，登录输错密码无反馈），再清 Token 跳登录
+    ElMessage.error(msg)
+    if (err.response?.status === 401) {
       // 未授权：清 Token 并跳登录，由路由守卫接管
       setToken('')
-      window.location.hash = '#/login'
-      return Promise.reject(err)
+      if (!window.location.hash.startsWith('#/login')) {
+        window.location.hash = '#/login'
+      }
     }
-    // 统一错误提示，禁止各组件重复弹窗；登录失败文案以后端为准，不区分原因
-    ElMessage.error(err.response?.data?.message ?? '请求失败')
     return Promise.reject(err)
   },
 )

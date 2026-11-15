@@ -49,7 +49,8 @@ interface RawFilePage {
   items: RawFile[] | null
 }
 
-function toFile(r: RawFile): FileItem {
+/** 原始 DTO → 前端模型（供 api/upload.ts 复用 complete 的 FileResponse 转换） */
+export function toFile(r: RawFile): FileItem {
   return {
     id: r.id,
     fileName: r.file_name,

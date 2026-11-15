@@ -4,13 +4,23 @@ import { ElMessage } from 'element-plus'
 import { useFileStore } from '@/store/file'
 import { isSimpleSizeOk } from '@/components/upload'
 
-// S5 简单上传：原生 input + axios onUploadProgress，不用 el-upload 内置上传；
-// 扩展名/内容嗅探留给服务端，前端只卡 ≤2MB；失败由 request 统一弹窗
+// S1 上传组件：≤2MB 走简单上传，>2MB 自动走分片链路（Worker 算 SHA256 + 并发传片）
+// 扩展名/内容嗅探留给服务端，前端只卡体积；失败由 request 统一弹窗
 const store = useFileStore()
 const inputRef = ref<HTMLInputElement | null>(null)
 
 function openPicker(): void {
   inputRef.value?.click()
+}
+
+function phaseText(): string {
+  if (store.phase === 'hashing') {
+    return '正在计算文件哈希…'
+  }
+  if (store.phase === 'merging') {
+    return '正在合并文件…'
+  }
+  return '正在上传分片…'
 }
 
 async function onChange(e: Event): Promise<void> {
@@ -19,13 +29,12 @@ async function onChange(e: Event): Promise<void> {
   if (!f) {
     return
   }
-  if (!isSimpleSizeOk(f.size)) {
-    ElMessage.error('文件需 ≤2MB，请走 W8 分片上传')
-    input.value = ''
-    return
-  }
   try {
-    await store.uploadOne(f)
+    if (isSimpleSizeOk(f.size)) {
+      await store.uploadOne(f)
+    } else {
+      await store.uploadChunked(f)
+    }
     ElMessage.success('上传成功')
   } finally {
     input.value = ''
@@ -48,12 +57,17 @@ async function onChange(e: Event): Promise<void> {
     >
       上传文件
     </el-button>
-    <el-progress
+    <div
       v-if="store.uploading"
-      :percentage="store.progress"
-      :show-text="false"
-      class="progress"
-    />
+      class="progress-wrap"
+    >
+      <el-progress
+        :percentage="store.progress"
+        :show-text="false"
+        class="progress"
+      />
+      <span class="phase-text">{{ phaseText() }}</span>
+    </div>
   </div>
 </template>
 
@@ -68,7 +82,19 @@ async function onChange(e: Event): Promise<void> {
   display: none;
 }
 
+.progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 200px;
+}
+
 .progress {
-  width: 160px;
+  width: 200px;
+}
+
+.phase-text {
+  color: var(--cb-slate);
+  font-size: 12px;
 }
 </style>

@@ -93,6 +93,48 @@ func parseShareID(s string) (uint64, error) {
 	return id, nil
 }
 
+// ListShares GET /api/v1/shares：需登录，只回本人有效分享；分页缺省 1/20
+func (h *ShareHandler) ListShares(c *gin.Context) {
+	var q dto.ListSharesQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		response.Fail(c, http.StatusBadRequest, codeInvalidParams, "请求参数不正确")
+		return
+	}
+	entries, total, page, pageSize, err := h.svc.ListShares(c.GetUint64(middleware.CtxUserID), q.Page, q.PageSize)
+	if err != nil {
+		h.failShare(c, err)
+		return
+	}
+	items := make([]dto.ShareListItem, 0, len(entries))
+	for _, e := range entries {
+		if e == nil || e.Share == nil {
+			continue
+		}
+		s := e.Share
+		var expStr *string
+		if s.ExpireAt.Valid {
+			v := s.ExpireAt.Time.Format("2006-01-02 15:04:05")
+			expStr = &v
+		}
+		var maxPtr *int32
+		if s.MaxDownloads.Valid {
+			v := s.MaxDownloads.Int32
+			maxPtr = &v
+		}
+		name := e.FileName
+		if name == "" {
+			name = "文件已删除"
+		}
+		items = append(items, dto.ShareListItem{
+			ID: s.ID, ShareCode: s.ShareCode, ShareURL: "/s/" + s.ShareCode,
+			FileID: s.FileID, FileName: name, ExpireAt: expStr,
+			MaxDownloads: maxPtr, DownloadCount: s.DownloadCount,
+			CreatedAt: s.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+	response.OK(c, dto.ShareListResponse{Total: total, Page: page, PageSize: pageSize, Items: items})
+}
+
 // CancelShare DELETE /api/v1/shares/:id：需登录，仅 owner；幂等由仓储保证，他人/不存在一律 404/40004「分享不存在」防枚举
 // S4：成功后审计 share_cancel（C方案 detail 只记 share_id/file_id/file_name，禁记 share_code 明文/哈希）
 func (h *ShareHandler) CancelShare(c *gin.Context) {

@@ -4,9 +4,9 @@ import { NAV_ITEMS, resolveActive } from '@/components/nav'
 import { WHITE_LIST, resolveRedirect } from '@/router'
 
 describe('S3 主框架导航（nav.ts）', () => {
-  it('NAV_ITEMS 首项为文件页，W8 两项 disabled 占位', () => {
+  it('NAV_ITEMS 首项为文件页，仅仪表盘 disabled 占位', () => {
     expect(NAV_ITEMS[0]?.index).toBe('/files')
-    expect(NAV_ITEMS.filter((i) => i.disabled).length).toBe(2)
+    expect(NAV_ITEMS.filter((i) => i.disabled).length).toBe(1)
   })
 
   it('resolveActive 由 path 推导高亮，空路径兜底 /files', () => {

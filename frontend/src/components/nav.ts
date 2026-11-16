@@ -10,7 +10,7 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { index: '/files', label: '文件' },
-  { index: '/shares', label: '分享（W8）', disabled: true },
+  { index: '/shares', label: '分享' },
   { index: '/dashboard', label: '仪表盘（W8）', disabled: true },
 ]
 

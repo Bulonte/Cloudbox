@@ -13,6 +13,7 @@ const emit = defineEmits<{
   (e: 'enter', f: FileItem): void
   (e: 'rename', f: FileItem): void
   (e: 'remove', f: FileItem): void
+  (e: 'share', f: FileItem): void
 }>()
 
 function sizeText(row: FileItem): string {
@@ -86,6 +87,13 @@ function sizeText(row: FileItem): string {
           @click="emit('enter', row)"
         >
           进入
+        </el-button>
+        <el-button
+          v-if="row.isFolder === 0"
+          link
+          @click="emit('share', row)"
+        >
+          分享
         </el-button>
         <el-button
           link

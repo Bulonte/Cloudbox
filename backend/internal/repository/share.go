@@ -78,6 +78,31 @@ func (r *ShareRepository) CancelShare(id, ownerID uint64) error {
 	return nil
 }
 
+// ListByOwner 按属主分页列出有效分享（status=1，供 S3 分享管理页用）；
+// 归属在 SQL 层过滤（owner_id = ?）；按 id DESC 倒序；total 供分页用
+func (r *ShareRepository) ListByOwner(ownerID uint64, offset, limit int) ([]*model.FileShare, int64, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	cond := "owner_id = ? AND status = 1"
+	var total int64
+	if err := r.db.Model(&model.FileShare{}).Where(cond, ownerID).Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("统计分享数: %w", err)
+	}
+	var rows []*model.FileShare
+	if err := r.db.Select(shareColumns).Where(cond, ownerID).
+		Order("id DESC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("列出分享: %w", err)
+	}
+	return rows, total, nil
+}
+
 // SetExpireAt 调整过期时间（单测/管理校准用；生产创建后一般不变）
 func (r *ShareRepository) SetExpireAt(id uint64, exp sql.NullTime) error {
 	if err := r.db.Model(&model.FileShare{}).Where("id = ?", id).Update("expire_at", exp).Error; err != nil {

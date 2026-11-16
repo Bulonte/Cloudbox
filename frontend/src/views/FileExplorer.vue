@@ -6,15 +6,19 @@ import { useFileStore } from '@/store/file'
 import { validFileName } from '@/utils/format'
 import FileList from '@/components/FileList.vue'
 import Uploader from '@/components/Uploader.vue'
+import ShareCreateDialog from '@/views/ShareCreateDialog.vue'
 
 // S4 文件浏览器：容器管数据 + 弹窗，列表渲染下沉 FileList；成功刷列表，失败由 request 统一弹窗
+// S3 分享入口：FileList 的分享按钮打开 ShareCreateDialog，创建成功不刷列表（分享列表在 /shares 看）
 const store = useFileStore()
 
 const createVisible = ref(false)
 const renameVisible = ref(false)
+const shareVisible = ref(false)
 const folderName = ref('')
 const renameName = ref('')
 const renameTarget = ref<FileItem | null>(null)
+const shareTarget = ref<FileItem | null>(null)
 const submitting = ref(false)
 
 onMounted(() => {
@@ -30,6 +34,11 @@ function openRename(f: FileItem): void {
   renameTarget.value = f
   renameName.value = f.fileName
   renameVisible.value = true
+}
+
+function openShare(f: FileItem): void {
+  shareTarget.value = f
+  shareVisible.value = true
 }
 
 async function submitCreate(): Promise<void> {
@@ -117,6 +126,12 @@ async function onPageChange(p: number): Promise<void> {
       @enter="store.enterFolder"
       @rename="openRename"
       @remove="confirmRemove"
+      @share="openShare"
+    />
+
+    <ShareCreateDialog
+      v-model:visible="shareVisible"
+      :file="shareTarget"
     />
 
     <div class="explorer-page">

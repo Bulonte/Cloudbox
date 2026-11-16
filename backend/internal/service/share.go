@@ -352,6 +352,46 @@ func (s *ShareService) AccessShare(code, pw, ip string) (*model.FileShare, *mode
 	return share, f, nil
 }
 
+// ShareListEntry 分享列表行：分享行 + 文件名快照（文件已删时 FileName 为空，DTO 层兜底展示）
+// S3：供 GET /api/v1/shares 列表用，只回本人数据（归属 SQL 层已过滤）
+type ShareListEntry struct {
+	Share    *model.FileShare
+	FileName string
+}
+
+// ListShares 按属主分页列出有效分享：page/page_size 缺省 1/20，上限 1000；
+// file_name 逐行回填（FindByID 同属主；已删/无行则空串，不阻断列表）；owner 非法一律参错
+func (s *ShareService) ListShares(ownerID uint64, page, pageSize int) ([]*ShareListEntry, int64, int, int, error) {
+	if ownerID == 0 {
+		return nil, 0, 0, 0, fmt.Errorf("%w: 分享人非法", ErrInvalidParams)
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 1000 {
+		pageSize = 1000
+	}
+	offset := (page - 1) * pageSize
+	rows, total, err := s.shares.ListByOwner(ownerID, offset, pageSize)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	entries := make([]*ShareListEntry, 0, len(rows))
+	for _, row := range rows {
+		name := ""
+		if row != nil {
+			if f, ferr := s.files.FindByID(row.FileID, ownerID); ferr == nil && f != nil {
+				name = f.FileName
+			}
+		}
+		entries = append(entries, &ShareListEntry{Share: row, FileName: name})
+	}
+	return entries, total, page, pageSize, nil
+}
+
 // CancelShare 取消分享（S4审计 share_cancel；幂等由仓储保证，他人/不存在一律 ErrShareNotFound 伪装）
 // C方案：target=share/ID，detail={share_id,file_id,file_name}，禁记 share_code 明文/哈希；IP 经可变参透传
 func (s *ShareService) CancelShare(ownerID, shareID uint64, ips ...string) error {

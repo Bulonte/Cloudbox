@@ -7,6 +7,7 @@ import {
   MAX_CHUNK_SIZE,
   calcTotalChunks,
   checkChunkFile,
+  decideInstant,
   isChunkSizeOk,
   runPool,
 } from '@/components/upload'
@@ -104,5 +105,20 @@ describe('S1 runPool（并发上限必须有界）', () => {
       },
     ]
     await expect(runPool(tasks, 3)).rejects.toThrow('boom')
+  })
+})
+
+describe('S2 decideInstant（与后端 InstantResult 三分支对齐）', () => {
+  it('本人命中走秒传', () => {
+    expect(decideInstant(true, false)).toBe('instant')
+    expect(decideInstant(true, true)).toBe('instant')
+  })
+
+  it('他人已存需用户确认', () => {
+    expect(decideInstant(false, true)).toBe('confirm-global')
+  })
+
+  it('全 miss 走正常上传', () => {
+    expect(decideInstant(false, false)).toBe('upload')
   })
 })

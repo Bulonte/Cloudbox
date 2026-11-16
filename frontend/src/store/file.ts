@@ -8,7 +8,10 @@ import {
   DEFAULT_CONCURRENCY,
   calcTotalChunks,
   checkChunkFile,
+  decideInstant,
   runPool,
+  type InstantDecision,
+  type UploadOutcome,
 } from '@/components/upload'
 
 // S4 文件状态：唯一可信源（items/total/page/parentId/crumbs），选中态等派生状态由组件本地维护
@@ -76,16 +79,42 @@ export const useFileStore = defineStore('file', () => {
     await fetchList()
   }
 
-  // S5 简单上传：进度经回调回写，成功刷列表；失败由 request 统一弹窗，uploading 必回 false
-  async function uploadOne(f: File): Promise<void> {
+  // S2 秒传预检：只读查询，不写盘不碰配额；决策映射见 decideInstant
+  async function checkInstant(f: File, fileHash: string): Promise<InstantDecision> {
+    const res = await fileApi.instantCheck({
+      fileName: f.name,
+      parentId: parentId.value,
+      fileHash,
+    })
+    return decideInstant(res.hit, res.existsGlobal)
+  }
+
+  // S2 简单上传：哈希 → 预检 → 上传；hit 秒传零写请求；confirm-global 经回调确认，取消零写请求
+  async function uploadOne(f: File, onConflict?: () => Promise<boolean>): Promise<UploadOutcome> {
     uploading.value = true
     progress.value = 0
-    phase.value = 'uploading'
+    phase.value = 'hashing'
     try {
+      const fileHash = await computeFileHash(f)
+      progress.value = 10
+      const decision = await checkInstant(f, fileHash)
+      if (decision === 'instant') {
+        progress.value = 100
+        await fetchList()
+        return 'instant'
+      }
+      if (decision === 'confirm-global') {
+        const goOn = onConflict ? await onConflict() : false
+        if (!goOn) {
+          return 'cancelled'
+        }
+      }
+      phase.value = 'uploading'
       await fileApi.upload(f, parentId.value, (p) => {
-        progress.value = p
+        progress.value = 10 + Math.round((90 * p) / 100)
       })
       await fetchList()
+      return 'uploaded'
     } finally {
       uploading.value = false
       phase.value = 'idle'
@@ -97,7 +126,11 @@ export const useFileStore = defineStore('file', () => {
    * 流程：Worker 算 SHA256 → init 会话 → 并发传片 → complete 合并 → 刷列表。
    * 进度按已传字节 / 总字节计算（不按片数，避免末片大小差异导致跳变）。
    */
-  async function uploadChunked(f: File, chunkSize: number = CHUNK_SIZE): Promise<void> {
+  async function uploadChunked(
+    f: File,
+    chunkSize: number = CHUNK_SIZE,
+    onConflict?: () => Promise<boolean>,
+  ): Promise<UploadOutcome> {
     const totalChunks = calcTotalChunks(f.size, chunkSize)
     const reason = checkChunkFile(f.size, totalChunks)
     if (reason) {
@@ -108,6 +141,20 @@ export const useFileStore = defineStore('file', () => {
     phase.value = 'hashing'
     try {
       const fileHash = await computeFileHash(f)
+      progress.value = 10
+      // S2 秒传预检：hit 本人已有直接秒传；confirm-global 经回调确认，取消则零写请求返回
+      const decision = await checkInstant(f, fileHash)
+      if (decision === 'instant') {
+        progress.value = 100
+        await fetchList()
+        return 'instant'
+      }
+      if (decision === 'confirm-global') {
+        const goOn = onConflict ? await onConflict() : false
+        if (!goOn) {
+          return 'cancelled'
+        }
+      }
       phase.value = 'uploading'
       const init = await uploadApi.init({
         fileName: f.name,
@@ -150,6 +197,7 @@ export const useFileStore = defineStore('file', () => {
       await uploadApi.complete(init.uploadId, f.name, parentId.value)
       progress.value = 100
       await fetchList()
+      return 'uploaded'
     } finally {
       uploading.value = false
       phase.value = 'idle'

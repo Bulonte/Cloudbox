@@ -87,3 +87,21 @@ export async function runPool(tasks: (() => Promise<void>)[], limit: number): Pr
   })
   await Promise.all(workers)
 }
+
+// S2 秒传决策：纯函数，零依赖，可单测
+// hit=true 本人已有 → 秒传；exists_global=true 他人已存 → 先确认再决定；全 miss → 正常上传
+/** 秒传预检决策：instant 秒传 / upload 正常传 / confirm-global 需用户确认 */
+export type InstantDecision = 'instant' | 'upload' | 'confirm-global'
+
+/** 上传结果：instant 秒传完成 / uploaded 实传完成 / cancelled 用户取消（零写请求） */
+export type UploadOutcome = 'instant' | 'uploaded' | 'cancelled'
+
+export function decideInstant(hit: boolean, existsGlobal: boolean): InstantDecision {
+  if (hit) {
+    return 'instant'
+  }
+  if (existsGlobal) {
+    return 'confirm-global'
+  }
+  return 'upload'
+}

@@ -13,6 +13,7 @@ vi.mock('@/api/file', () => ({
     update: vi.fn(),
     remove: vi.fn(),
     upload: vi.fn(),
+    instantCheck: vi.fn(),
   },
 }))
 
@@ -62,6 +63,7 @@ describe('S1 file store 分片上传编排', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
     mockedUpload.init.mockResolvedValue({
       uploadId: 'up-1',
       fileHash: HASH,
@@ -165,5 +167,69 @@ describe('S1 file store 分片上传编排', () => {
     expect(seen).toContain('hashing')
     expect(seen).toContain('uploading')
     expect(seen).toContain('merging')
+  })
+})
+
+describe('S2 chunk store 秒传预检三分支', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
+    mockedUpload.init.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 2,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+    })
+    mockedUpload.uploadChunk.mockResolvedValue({ uploadId: 'up-1', chunkIndex: 0, size: 1, status: 1 })
+    mockedUpload.complete.mockResolvedValue(item(21, 'big.txt'))
+    mockedFile.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(21, 'big.txt')] })
+  })
+
+  it('hit 秒传：不调 init，返回 instant', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mockedFile.instantCheck.mockResolvedValue({ hit: true, existsGlobal: false, file: item(21, 'big.txt') })
+    const store = useFileStore()
+    const outcome = await store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))
+    expect(outcome).toBe('instant')
+    expect(mockedFile.instantCheck).toHaveBeenCalledWith({ fileName: 'big.txt', parentId: 0, fileHash: HASH })
+    expect(mockedUpload.init).not.toHaveBeenCalled()
+    expect(mockedUpload.complete).not.toHaveBeenCalled()
+    expect(store.progress).toBe(100)
+    expect(store.uploading).toBe(false)
+  })
+
+  it('confirm-global 取消：不调 init，返回 cancelled', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: true, file: null })
+    const store = useFileStore()
+    const outcome = await store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024), CHUNK_SIZE, async () => false)
+    expect(outcome).toBe('cancelled')
+    expect(mockedUpload.init).not.toHaveBeenCalled()
+    expect(mockedUpload.complete).not.toHaveBeenCalled()
+    expect(store.uploading).toBe(false)
+    expect(store.phase).toBe('idle')
+  })
+
+  it('confirm-global 确认后走分片全链路', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: true, file: null })
+    const store = useFileStore()
+    const outcome = await store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024), CHUNK_SIZE, async () => true)
+    expect(outcome).toBe('uploaded')
+    expect(mockedUpload.init).toHaveBeenCalledOnce()
+    expect(mockedUpload.complete).toHaveBeenCalledOnce()
+  })
+
+  it('预检失败时错误上浮且不 init', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mockedFile.instantCheck.mockRejectedValue(new Error('400'))
+    const store = useFileStore()
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('400')
+    expect(mockedUpload.init).not.toHaveBeenCalled()
+    expect(store.uploading).toBe(false)
+    expect(store.phase).toBe('idle')
   })
 })

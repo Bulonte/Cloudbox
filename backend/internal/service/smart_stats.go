@@ -6,13 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"cloudbox/internal/api/dto"
 	"cloudbox/internal/repository"
 	"cloudbox/internal/service/smart"
 )
 
 // SmartStatsService 仪表盘聚合：只读 5 路聚合 + 内存相似比对，不写盘不动配额
 // 归属一律 SQL 层带 owner_id；days 归一 1..30，缺省 14
+// S5-fix：service 禁依赖 api/dto（层级倒置），此处自有载体类型，Handler 负责转 DTO
 type SmartStatsService struct {
 	files *repository.FileRepository
 	fps   *repository.FingerprintRepository
@@ -24,12 +24,59 @@ func NewSmartStatsService(files *repository.FileRepository, fps *repository.Fing
 	return &SmartStatsService{files: files, fps: fps, users: users}
 }
 
-// SmartStatsResult 内部载体（Handler 转 DTO；字段与 dto.SmartStatsResponse 一一对应）
+// StorageTypeItem 按文件类型聚合行：type 冻结 6 项 image/video/audio/document/archive/other
+type StorageTypeItem struct {
+	Type  string
+	Bytes uint64
+	Count int64
+}
+
+// StorageBlock 存储概览载体（Handler 转 dto.StorageBlock）
+type StorageBlock struct {
+	UsedBytes  uint64
+	QuotaBytes uint64
+	FileCount  int64
+	ByType     []StorageTypeItem
+}
+
+// TimelinePoint 上传时间线点：date 为 YYYY-MM-DD
+type TimelinePoint struct {
+	Date  string
+	Count int64
+	Bytes uint64
+}
+
+// CategoryItem 分类分布行
+type CategoryItem struct {
+	Category string
+	Count    int64
+}
+
+// DuplicateItem 重复报告行：kind=exact/similar
+type DuplicateItem struct {
+	Kind       string
+	FileIDs    []uint64
+	FileNames  []string
+	Count      int
+	SavedBytes uint64
+}
+
+// DuplicatesBlock 重复检测报告载体（Handler 转 dto.DuplicatesBlock）
+type DuplicatesBlock struct {
+	ExactGroups     int
+	ExactFiles      int
+	ExactSavedBytes uint64
+	SimilarGroups   int
+	SimilarFiles    int
+	Items           []DuplicateItem
+}
+
+// SmartStatsResult 内部载体（Handler 转 DTO）
 type SmartStatsResult struct {
-	Storage    dto.StorageBlock
-	Timeline   []dto.TimelinePoint
-	Category   []dto.CategoryItem
-	Duplicates dto.DuplicatesBlock
+	Storage    StorageBlock
+	Timeline   []TimelinePoint
+	Category   []CategoryItem
+	Duplicates DuplicatesBlock
 }
 
 // statsDays 归一：<=0 缺省 14；>30 截 30
@@ -134,14 +181,14 @@ func (s *SmartStatsService) GetStats(ownerID uint64, days int) (*SmartStatsResul
 	}
 	tl := timeline
 	if tl == nil {
-		tl = []dto.TimelinePoint{}
+		tl = []TimelinePoint{}
 	}
 	cat := category
 	if cat == nil {
-		cat = []dto.CategoryItem{}
+		cat = []CategoryItem{}
 	}
 	return &SmartStatsResult{
-		Storage: dto.StorageBlock{
+		Storage: StorageBlock{
 			UsedBytes:  used,
 			QuotaBytes: u.QuotaBytes,
 			FileCount:  count,
@@ -154,13 +201,13 @@ func (s *SmartStatsService) GetStats(ownerID uint64, days int) (*SmartStatsResul
 }
 
 // storageByType mime 聚合 → 6 类合并（固定顺序 image/video/audio/document/archive/other）
-func (s *SmartStatsService) storageByType(ownerID uint64) ([]dto.StorageTypeItem, error) {
+func (s *SmartStatsService) storageByType(ownerID uint64) ([]StorageTypeItem, error) {
 	rows, err := s.files.GroupSizeByMime(ownerID)
 	if err != nil {
 		return nil, err
 	}
 	// mime 行无文件名，按 mime 主类型映射（扩展名兜底缺文件名时归 other/document 大类即可）
-	agg := map[string]*dto.StorageTypeItem{
+	agg := map[string]*StorageTypeItem{
 		"image":    {Type: "image"},
 		"video":    {Type: "video"},
 		"audio":    {Type: "audio"},
@@ -177,7 +224,7 @@ func (s *SmartStatsService) storageByType(ownerID uint64) ([]dto.StorageTypeItem
 		a.Count += r.Count
 	}
 	order := []string{"image", "video", "audio", "document", "archive", "other"}
-	out := make([]dto.StorageTypeItem, 0, len(order))
+	out := make([]StorageTypeItem, 0, len(order))
 	for _, k := range order {
 		out = append(out, *agg[k])
 	}
@@ -185,7 +232,7 @@ func (s *SmartStatsService) storageByType(ownerID uint64) ([]dto.StorageTypeItem
 }
 
 // buildTimeline 最近 days 天补零（date ASC，空库全零线）
-func (s *SmartStatsService) buildTimeline(ownerID uint64, days int) ([]dto.TimelinePoint, error) {
+func (s *SmartStatsService) buildTimeline(ownerID uint64, days int) ([]TimelinePoint, error) {
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	since := day0.AddDate(0, 0, -(days - 1))
@@ -193,28 +240,28 @@ func (s *SmartStatsService) buildTimeline(ownerID uint64, days int) ([]dto.Timel
 	if err != nil {
 		return nil, err
 	}
-	byDate := make(map[string]dto.TimelinePoint, len(rows))
+	byDate := make(map[string]TimelinePoint, len(rows))
 	for _, r := range rows {
 		var b uint64
 		if r.Bytes > 0 {
 			b = uint64(r.Bytes)
 		}
-		byDate[r.Date] = dto.TimelinePoint{Date: r.Date, Count: r.Count, Bytes: b}
+		byDate[r.Date] = TimelinePoint{Date: r.Date, Count: r.Count, Bytes: b}
 	}
-	out := make([]dto.TimelinePoint, 0, days)
+	out := make([]TimelinePoint, 0, days)
 	for i := 0; i < days; i++ {
 		d := since.AddDate(0, 0, i).Format("2006-01-02")
 		if p, ok := byDate[d]; ok {
 			out = append(out, p)
 			continue
 		}
-		out = append(out, dto.TimelinePoint{Date: d, Count: 0, Bytes: 0})
+		out = append(out, TimelinePoint{Date: d, Count: 0, Bytes: 0})
 	}
 	return out, nil
 }
 
 // buildCategory 9 大类 + 待确认（count DESC 已由仓储排，归一后保持稳定排序）
-func (s *SmartStatsService) buildCategory(ownerID uint64) ([]dto.CategoryItem, error) {
+func (s *SmartStatsService) buildCategory(ownerID uint64) ([]CategoryItem, error) {
 	rows, err := s.files.GroupCountByCategory(ownerID)
 	if err != nil {
 		return nil, err
@@ -223,9 +270,9 @@ func (s *SmartStatsService) buildCategory(ownerID uint64) ([]dto.CategoryItem, e
 	for _, r := range rows {
 		agg[normalizeCategory(r.Category)] += r.Count
 	}
-	out := make([]dto.CategoryItem, 0, len(agg))
+	out := make([]CategoryItem, 0, len(agg))
 	for k, v := range agg {
-		out = append(out, dto.CategoryItem{Category: k, Count: v})
+		out = append(out, CategoryItem{Category: k, Count: v})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count != out[j].Count {
@@ -234,7 +281,7 @@ func (s *SmartStatsService) buildCategory(ownerID uint64) ([]dto.CategoryItem, e
 		return out[i].Category < out[j].Category
 	})
 	if out == nil {
-		out = []dto.CategoryItem{}
+		out = []CategoryItem{}
 	}
 	return out, nil
 }
@@ -252,8 +299,8 @@ func similarPair(algo string, a, b uint64) bool {
 
 // buildDuplicates 精确组（SQL，同 hash；uk_hash 全局唯一故本人内恒为 0，保留口径防回归）
 // + 相似组（simhash/phash 指纹 Hamming<5，500 截断内内存两两比对，最多 20 明细）
-func (s *SmartStatsService) buildDuplicates(ownerID uint64) (dto.DuplicatesBlock, error) {
-	block := dto.DuplicatesBlock{Items: []dto.DuplicateItem{}}
+func (s *SmartStatsService) buildDuplicates(ownerID uint64) (DuplicatesBlock, error) {
+	block := DuplicatesBlock{Items: []DuplicateItem{}}
 	groups, err := s.files.ExactDuplicateGroups(ownerID)
 	if err != nil {
 		return block, err
@@ -281,7 +328,7 @@ func (s *SmartStatsService) buildDuplicates(ownerID uint64) (dto.DuplicatesBlock
 		block.ExactFiles += n
 		block.ExactSavedBytes += saved
 		if len(block.Items) < 20 {
-			block.Items = append(block.Items, dto.DuplicateItem{
+			block.Items = append(block.Items, DuplicateItem{
 				Kind:       "exact",
 				FileIDs:    ids,
 				FileNames:  names,
@@ -305,7 +352,7 @@ func (s *SmartStatsService) buildDuplicates(ownerID uint64) (dto.DuplicatesBlock
 				ids = append(ids, m.FileID)
 				names = append(names, m.FileName)
 			}
-			block.Items = append(block.Items, dto.DuplicateItem{
+			block.Items = append(block.Items, DuplicateItem{
 				Kind:       "similar",
 				FileIDs:    ids,
 				FileNames:  names,

@@ -24,29 +24,53 @@ func NewSmartHandler(svc *service.SmartStatsService) *SmartHandler {
 
 // ToSmartStatsResponse 内部载体转脱敏 DTO（数组恒为 [] 非 null）
 func ToSmartStatsResponse(r *service.SmartStatsResult) dto.SmartStatsResponse {
-	tl := r.Timeline
-	if tl == nil {
-		tl = []dto.TimelinePoint{}
+	tl := make([]dto.TimelinePoint, 0, len(r.Timeline))
+	for _, p := range r.Timeline {
+		tl = append(tl, dto.TimelinePoint{Date: p.Date, Count: p.Count, Bytes: p.Bytes})
 	}
-	cat := r.Category
-	if cat == nil {
-		cat = []dto.CategoryItem{}
+	cat := make([]dto.CategoryItem, 0, len(r.Category))
+	for _, c := range r.Category {
+		cat = append(cat, dto.CategoryItem{Category: c.Category, Count: c.Count})
 	}
-	byType := r.Storage.ByType
-	if byType == nil {
-		byType = []dto.StorageTypeItem{}
+	byType := make([]dto.StorageTypeItem, 0, len(r.Storage.ByType))
+	for _, t := range r.Storage.ByType {
+		byType = append(byType, dto.StorageTypeItem{Type: t.Type, Bytes: t.Bytes, Count: t.Count})
 	}
-	items := r.Duplicates.Items
-	if items == nil {
-		items = []dto.DuplicateItem{}
+	items := make([]dto.DuplicateItem, 0, len(r.Duplicates.Items))
+	for _, it := range r.Duplicates.Items {
+		ids := append([]uint64(nil), it.FileIDs...)
+		if ids == nil {
+			ids = []uint64{}
+		}
+		names := append([]string(nil), it.FileNames...)
+		if names == nil {
+			names = []string{}
+		}
+		items = append(items, dto.DuplicateItem{
+			Kind:       it.Kind,
+			FileIDs:    ids,
+			FileNames:  names,
+			Count:      it.Count,
+			SavedBytes: it.SavedBytes,
+		})
 	}
-	r.Duplicates.Items = items
-	r.Storage.ByType = byType
 	return dto.SmartStatsResponse{
-		Storage:    r.Storage,
-		Timeline:   tl,
-		Category:   cat,
-		Duplicates: r.Duplicates,
+		Storage: dto.StorageBlock{
+			UsedBytes:  r.Storage.UsedBytes,
+			QuotaBytes: r.Storage.QuotaBytes,
+			FileCount:  r.Storage.FileCount,
+			ByType:     byType,
+		},
+		Timeline: tl,
+		Category: cat,
+		Duplicates: dto.DuplicatesBlock{
+			ExactGroups:     r.Duplicates.ExactGroups,
+			ExactFiles:      r.Duplicates.ExactFiles,
+			ExactSavedBytes: r.Duplicates.ExactSavedBytes,
+			SimilarGroups:   r.Duplicates.SimilarGroups,
+			SimilarFiles:    r.Duplicates.SimilarFiles,
+			Items:           items,
+		},
 	}
 }
 

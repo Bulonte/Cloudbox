@@ -409,6 +409,23 @@ describe('S4 断点续传（progress 查进度只补 missing）', () => {
     expect(mockedUpload.complete).toHaveBeenCalledWith('up-3', 'big.txt', 0)
   })
 
+  it('全新init中断时resumable按本轮成功片计数（非恒0）', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    // 0/1 立即成功、2 延迟失败：保证失败抛出时成功集已落袋
+    mockedUpload.uploadChunk.mockImplementation(async (_id: string, idx: number) => {
+      if (idx === 2) {
+        await new Promise((r) => setTimeout(r, 10))
+        throw new Error('net-partial')
+      }
+      return { uploadId: 'up-1', chunkIndex: idx, size: 1, status: 1 }
+    })
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net-partial')
+    expect(store.resumable).not.toBeNull()
+    expect(store.resumable?.uploaded).toBe(2)
+    expect(store.resumable?.total).toBe(3)
+  })
+
   it('补传失败保留 resumable，可再次 resumeLast 重试同一 uploadId', async () => {
     const { useFileStore } = await import('@/store/file')
     const store = useFileStore()

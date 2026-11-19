@@ -163,6 +163,9 @@ export const useFileStore = defineStore('file', () => {
     const uploadWeight = 85
     let uploadedBytes = baseBytes
     const chunkDone = new Map<number, number>()
+    // S4-fix：记录本轮已成功的序号；runPool 任一失败即整体 reject，
+    // 靠此列表在 catch 中折算“已传 N 片”，否则全新 init 路径恒显示 0/N
+    const succeeded: number[] = []
     const tasks = indexes.map((index) => {
       const start = index * chunkSize
       const end = Math.min(start + chunkSize, f.size)
@@ -177,9 +180,16 @@ export const useFileStore = defineStore('file', () => {
             hashWeight + Math.round(uploadWeight * ratio),
           )
         })
+        succeeded.push(index)
       }
     })
-    await runPool(tasks, DEFAULT_CONCURRENCY)
+    try {
+      await runPool(tasks, DEFAULT_CONCURRENCY)
+    } catch (err) {
+      const wrapped = err as { succeededIndexes?: number[] }
+      wrapped.succeededIndexes = [...succeeded]
+      throw err
+    }
   }
 
   /**
@@ -314,7 +324,13 @@ export const useFileStore = defineStore('file', () => {
         await uploadIndexes(f, uploadId, missing, chunkSize, baseBytes)
       } catch (e) {
         // 补传中断：保留 Map + resumable 供“继续上传”，上浮错误由 Uploader 弹窗
-        const doneCount = totalChunks - missing.length
+        // done = 旧基线（total - missing）+ 本轮新成功片（succeededIndexes），
+        // 否则全新 init 路径恒显示 0/N
+        const baseDone = totalChunks - missing.length
+        const raw = (e as { succeededIndexes?: number[] }).succeededIndexes ?? []
+        const fresh = new Set(raw).size
+        const doneCount = Math.min(totalChunks, baseDone + fresh)
+        skippedChunks.value = doneCount
         resumable.value = {
           fileName: f.name,
           uploaded: doneCount,

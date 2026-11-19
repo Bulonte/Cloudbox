@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { shareApi, type ShareInfo } from '@/api/share'
@@ -7,7 +7,9 @@ import { formatSize } from '@/utils/format'
 
 // S3 公开分享页（免登录）：/s/:code；密码在页内输入；失败统一“链接无效”
 const route = useRoute()
-const code = String(route.params.code ?? '')
+// 路由复用同一组件实例（/s/AAA → /s/BBB 不重建）：code 必须取 computed，
+// 随 param 变化重载，否则展示旧文件/下错旧码
+const code = computed(() => String(route.params.code ?? ''))
 const password = ref('')
 const loading = ref(false)
 const info = ref<ShareInfo | null>(null)
@@ -16,13 +18,20 @@ const downloading = ref(false)
 async function load(pw?: string): Promise<void> {
   loading.value = true
   try {
-    info.value = await shareApi.getInfo(code, pw)
+    info.value = await shareApi.getInfo(code.value, pw)
   } finally {
     loading.value = false
   }
 }
 
 onMounted(() => {
+  load().catch(() => undefined)
+})
+
+// 同组件内切换分享码：清空旧态重查
+watch(code, () => {
+  password.value = ''
+  info.value = null
   load().catch(() => undefined)
 })
 
@@ -36,7 +45,7 @@ async function download(): Promise<void> {
   }
   downloading.value = true
   try {
-    const blob = await shareApi.download(code, password.value.trim() || undefined)
+    const blob = await shareApi.download(code.value, password.value.trim() || undefined)
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

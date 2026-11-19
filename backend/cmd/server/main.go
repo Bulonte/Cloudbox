@@ -87,6 +87,9 @@ func main() {
 	api.RegisterShareRoutes(r, handler.NewShareHandler(shareSvc), jwtMgr, checker)
 	// W6-S2：分享公开链路（GET /s/:code + GET /api/v1/shares/:code/download，免登录；限流/伪装由 Service 层收口）
 	api.RegisterSharePublicRoutes(r, handler.NewShareHandler(shareSvc))
+	// W8-S5：仪表盘聚合（GET /api/v1/smart/stats，需登录；只读聚合不碰存储/配额）
+	smartSvc := service.NewSmartStatsService(fileRepo, fpsRepo, repository.NewUserRepository(db))
+	api.RegisterSmartRoutes(r, handler.NewSmartHandler(smartSvc), jwtMgr, checker)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.App.Port)); err != nil {
 		panic(err)
 	}

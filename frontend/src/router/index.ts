@@ -16,6 +16,8 @@ const router = createRouter({
         { path: 'files', component: () => import('@/views/FileExplorer.vue') },
         // S3 分享管理：需登录的本人分享列表
         { path: 'shares', component: () => import('@/views/ShareManager.vue') },
+        // S5 仪表盘：需登录的聚合可视化
+        { path: 'dashboard', component: () => import('@/views/Dashboard.vue') },
       ],
     },
     // S3 公开分享：免登录，密码在页内输入

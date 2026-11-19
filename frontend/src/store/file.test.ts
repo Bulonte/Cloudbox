@@ -96,6 +96,18 @@ describe('S5 file store 上传进度 + 刷列表', () => {
     expect(store.items.length).toBe(1)
   })
 
+  it('小文件成功清掉旧分片残留的 resumable（防幽灵继续上传）', async () => {
+    const { useFileStore } = await import('@/store/file')
+    mocked.upload.mockResolvedValue(item(9, 'a.pdf'))
+    mocked.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(9, 'a.pdf')] })
+    const store = useFileStore()
+    // 模拟一次分片失败残留
+    store.resumable = { fileName: 'big.txt', uploaded: 1, total: 3, skipped: 1 }
+    const outcome = await store.uploadOne(new File(['x'], 'a.pdf'))
+    expect(outcome).toBe('uploaded')
+    expect(store.resumable).toBeNull()
+  })
+
   it('失败时 uploading 照样回 false 且 items 不变', async () => {
     const { useFileStore } = await import('@/store/file')
     mocked.upload.mockRejectedValue(new Error('400'))

@@ -121,6 +121,9 @@ export const useFileStore = defineStore('file', () => {
       if (decision === 'instant') {
         progress.value = 100
         await fetchList()
+        // 小文件秒传成功：清掉旧分片残留的 resumable，防“继续上传”幽灵按钮
+        resumable.value = null
+        skippedChunks.value = 0
         return 'instant'
       }
       if (decision === 'confirm-global') {
@@ -134,6 +137,9 @@ export const useFileStore = defineStore('file', () => {
         progress.value = 10 + Math.round((90 * p) / 100)
       })
       await fetchList()
+      // 小文件直传成功同理：旧 resumable 已无意义，随成功清掉
+      resumable.value = null
+      skippedChunks.value = 0
       return 'uploaded'
     } finally {
       uploading.value = false

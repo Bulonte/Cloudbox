@@ -51,7 +51,9 @@ export const useFileStore = defineStore('file', () => {
   const pendingSessions = ref(new Map<string, string>())
   const resumable = ref<ResumableInfo | null>(null)
   const skippedChunks = ref(0)
-  let lastFile: File | null = null
+  // S4-fix：中断 File 由 store 持有（响应式），随 Pinia 跨路由存活；
+  // 组件私有的 pendingFile 跨路由卸载即丢，会造成“有按钮无文件”的死按钮
+  const pendingFile = ref<File | null>(null)
   let lastChunkSize = CHUNK_SIZE
   let lastConflict: (() => Promise<boolean>) | undefined
 
@@ -209,7 +211,7 @@ export const useFileStore = defineStore('file', () => {
       throw new Error(reason)
     }
     // 记住本次文件，供“继续上传”按钮复用同一 File 对象重入
-    lastFile = f
+    pendingFile.value = f
     lastChunkSize = chunkSize
     lastConflict = onConflict
     uploading.value = true
@@ -224,14 +226,14 @@ export const useFileStore = defineStore('file', () => {
       const decision = await checkInstant(f, fileHash)
       if (decision === 'instant') {
         progress.value = 100
-        lastFile = null
+        pendingFile.value = null
         await fetchList()
         return 'instant'
       }
       if (decision === 'confirm-global') {
         const goOn = onConflict ? await onConflict() : false
         if (!goOn) {
-          lastFile = null
+          pendingFile.value = null
           return 'cancelled'
         }
       }
@@ -271,7 +273,7 @@ export const useFileStore = defineStore('file', () => {
             await fetchList()
             pendingSessions.value.delete(key)
             resumable.value = null
-            lastFile = null
+            pendingFile.value = null
             return 'uploaded'
           }
           missing = [...p.missing].sort((a, b) => a - b)
@@ -347,7 +349,7 @@ export const useFileStore = defineStore('file', () => {
       pendingSessions.value.delete(key)
       resumable.value = null
       // S4：skipped 保留到下次上传开始，供 Uploader 成功提示“已跳过 N 片”
-      lastFile = null
+      pendingFile.value = null
       return 'uploaded'
     } finally {
       uploading.value = false
@@ -369,10 +371,10 @@ export const useFileStore = defineStore('file', () => {
 
   /** S4 “继续上传”：复用中断时同一 File 对象重入 resumeChunked */
   async function resumeLast(): Promise<UploadOutcome> {
-    if (!lastFile) {
+    if (!pendingFile.value) {
       throw new Error('没有可继续的上传任务')
     }
-    return resumeChunked(lastFile, lastChunkSize, lastConflict)
+    return resumeChunked(pendingFile.value, lastChunkSize, lastConflict)
   }
 
   function reset(): void {
@@ -388,7 +390,7 @@ export const useFileStore = defineStore('file', () => {
     pendingSessions.value.clear()
     resumable.value = null
     skippedChunks.value = 0
-    lastFile = null
+    pendingFile.value = null
   }
 
   return {
@@ -404,6 +406,7 @@ export const useFileStore = defineStore('file', () => {
     crumbs,
     resumable,
     skippedChunks,
+    pendingFile,
     fetchList,
     enterFolder,
     goCrumb,

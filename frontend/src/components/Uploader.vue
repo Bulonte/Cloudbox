@@ -11,8 +11,6 @@ import { CHUNK_SIZE, isSimpleSizeOk } from '@/components/upload'
 // 扩展名/内容嗅探留给服务端，前端只卡体积；失败由 request 统一弹窗
 const store = useFileStore()
 const inputRef = ref<HTMLInputElement | null>(null)
-// S4：保留中断时的 File 对象引用，input 清空前先存档，成功后丢弃
-let pendingFile: File | null = null
 
 function openPicker(): void {
   inputRef.value?.click()
@@ -51,19 +49,19 @@ async function onChange(e: Event): Promise<void> {
   if (!f) {
     return
   }
-  // S4：先存档 File 引用（input 清空后仍可“继续上传”复用同一对象）
+  // S4：File 引用由 store 持有（跨路由存活）；input 清空后仍可“继续上传”复用同一对象
   if (!isSimpleSizeOk(f.size)) {
-    pendingFile = f
+    store.pendingFile = f
   }
   try {
     const outcome = isSimpleSizeOk(f.size)
       ? await store.uploadOne(f, onConflict)
       : await store.uploadChunked(f, CHUNK_SIZE, onConflict)
     if (outcome === 'cancelled') {
-      pendingFile = null
+      store.pendingFile = null
       return
     }
-    pendingFile = null
+    store.pendingFile = null
     if (outcome === 'instant') {
       ElMessage.success('秒传完成')
       return
@@ -74,16 +72,19 @@ async function onChange(e: Event): Promise<void> {
     if (!axios.isAxiosError(e)) {
       ElMessage.error(e instanceof Error ? e.message : '上传失败')
     }
-    // 失败保留 pendingFile + store.resumable 供“继续上传”
+    // 失败保留 store.pendingFile + store.resumable 供“继续上传”
   } finally {
     input.value = ''
   }
 }
 
-// S4 继续上传：复用中断时的同一 File 对象重入；简单上传无续传，不保留
+// S4 继续上传：复用 store 内同一 File 对象重入；无文件时给提示防死按钮
 async function onResume(): Promise<void> {
-  const f = pendingFile
-  if (!f || store.uploading) {
+  if (!store.pendingFile) {
+    ElMessage.warning('上传文件已失效，请重新选择文件')
+    return
+  }
+  if (store.uploading) {
     return
   }
   try {
@@ -91,7 +92,7 @@ async function onResume(): Promise<void> {
     if (outcome === 'cancelled') {
       return
     }
-    pendingFile = null
+    store.pendingFile = null
     ElMessage.success(store.skippedChunks > 0 ? `续传完成，已跳过 ${store.skippedChunks} 片` : '上传成功')
   } catch (e) {
     // 仍失败则继续保留，可再次点击重试；本地失败同上补提示（axios 已由拦截器弹窗）
@@ -129,7 +130,7 @@ async function onResume(): Promise<void> {
       <span class="phase-text">{{ phaseText() }}</span>
     </div>
     <el-button
-      v-if="!store.uploading && store.resumable"
+      v-if="!store.uploading && store.resumable && store.pendingFile"
       type="warning"
       plain
       @click="onResume"

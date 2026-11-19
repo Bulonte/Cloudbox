@@ -6,6 +6,19 @@ import { ElMessage } from 'element-plus'
 
 const TOKEN_KEY = 'cb_token'
 
+/** 请求追踪 ID：secure context 用 crypto.randomUUID，内网 http 答辩机降级为随机串 */
+function newRequestId(): string {
+  try {
+    const c = globalThis.crypto as Crypto | undefined
+    if (c && typeof c.randomUUID === 'function') {
+      return c.randomUUID()
+    }
+  } catch {
+    // 降级走 Math.random，不抛错阻断请求
+  }
+  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 let memToken: string = sessionStorage.getItem(TOKEN_KEY) ?? ''
 
 /** 保存 Token（内存 + sessionStorage 双写） */
@@ -131,7 +144,7 @@ request.interceptors.request.use((cfg) => {
   if (t) {
     cfg.headers.Authorization = `Bearer ${t}`
   }
-  cfg.headers['X-Request-ID'] = crypto.randomUUID()
+  cfg.headers['X-Request-ID'] = newRequestId()
   return cfg
 })
 

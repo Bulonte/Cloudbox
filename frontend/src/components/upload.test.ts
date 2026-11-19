@@ -109,6 +109,21 @@ describe('S1 runPool（并发上限必须有界）', () => {
     ]
     await expect(runPool(tasks, 3)).rejects.toThrow('boom')
   })
+
+  it('失败后不再取新任务（首错定因，其余 worker 停取）', async () => {
+    const started: number[] = []
+    const tasks = Array.from({ length: 6 }, (_, i) => async (): Promise<void> => {
+      started.push(i)
+      if (i === 0) {
+        throw new Error('first-boom')
+      }
+      // 让 worker-0 先失败，其余在途任务收尾后不再取新任务
+      await new Promise((r) => setTimeout(r, 5))
+    })
+    await expect(runPool(tasks, 1)).rejects.toThrow('first-boom')
+    // limit=1 单 worker：失败即停，后续任务不再启动
+    expect(started).toEqual([0])
+  })
 })
 
 describe('S2 decideInstant（与后端 InstantResult 三分支对齐）', () => {

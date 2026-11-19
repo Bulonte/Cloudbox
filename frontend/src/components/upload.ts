@@ -71,6 +71,8 @@ export function checkChunkFile(size: number, totalChunks: number): string | null
 /**
  * 并发池：限制同时执行的任务数（规范 §5.3.3 并发必须有上限）。
  * 任务按序取用，任一任务 reject 则整体 reject（由调用方决定重试策略）。
+ * 失败后不再取新任务：首错置 failed 标志，其余 worker 当前任务收尾后即停，
+ * 避免失败后仍把剩余分片全部打出去（省无效请求，resumable 计数更准）。
  */
 export async function runPool(tasks: (() => Promise<void>)[], limit: number): Promise<void> {
   if (tasks.length === 0) {
@@ -78,14 +80,29 @@ export async function runPool(tasks: (() => Promise<void>)[], limit: number): Pr
   }
   const size = Math.max(1, Math.min(Math.floor(limit) || 1, tasks.length))
   let cursor = 0
+  let failed = false
+  let firstErr: unknown
   const workers = Array.from({ length: size }, async () => {
-    while (cursor < tasks.length) {
+    while (!failed && cursor < tasks.length) {
       const idx = cursor
       cursor += 1
-      await tasks[idx]()
+      try {
+        await tasks[idx]()
+      } catch (e) {
+        // 首错定因：置失败标志拦住其余 worker 取新任务，当前 worker 收尾退出；
+        // 其余在途任务继续跑完后自行停取，最后统一抛首错（调用方按 succeeded 折算已传片更准）
+        if (firstErr === undefined) {
+          firstErr = e
+        }
+        failed = true
+        return
+      }
     }
   })
   await Promise.all(workers)
+  if (firstErr !== undefined) {
+    throw firstErr
+  }
 }
 
 // S2 秒传决策：纯函数，零依赖，可单测

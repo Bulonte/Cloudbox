@@ -293,6 +293,42 @@ describe('S4 断点续传（progress 查进度只补 missing）', () => {
     expect(store.resumable).toBeNull()
   })
 
+  it('complete=true 时 complete 失败保留会话可重试、不回退全量重传', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    // 首轮中断：index=1 失败，留下 up-1 会话
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net'))
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net')
+    expect(mockedUpload.init).toHaveBeenCalledTimes(1)
+    vi.clearAllMocks()
+    mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
+    mockedUpload.progress.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+      uploaded: [0, 1, 2],
+      missing: [],
+      complete: true,
+    })
+    mockedFile.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(21, 'big.txt')] })
+    // complete 闪断失败：应上浮且保留 resumable/会话，不走全新 init 全量重传
+    mockedUpload.complete.mockRejectedValueOnce(new Error('merge-fail'))
+    await expect(store.resumeLast()).rejects.toThrow('merge-fail')
+    expect(mockedUpload.init).not.toHaveBeenCalled()
+    expect(mockedUpload.uploadChunk).not.toHaveBeenCalled()
+    expect(store.resumable).not.toBeNull()
+    expect(store.resumable?.uploaded).toBe(3)
+    // 重试：progress 仍 complete=true，complete 成功即收尾
+    mockedUpload.complete.mockResolvedValue(item(21, 'big.txt'))
+    const outcome = await store.resumeLast()
+    expect(outcome).toBe('uploaded')
+    expect(mockedUpload.complete).toHaveBeenCalledWith('up-1', 'big.txt', 0)
+    expect(store.resumable).toBeNull()
+  })
+
   it('missing=[1] 时只补传缺片', async () => {
     const { useFileStore } = await import('@/store/file')
     const store = useFileStore()

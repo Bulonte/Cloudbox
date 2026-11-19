@@ -228,25 +228,33 @@ export const useFileStore = defineStore('file', () => {
 
       if (oldId) {
         // 先只查 progress：查询失败（404/400 会话过期）或回显漂移 → 丢弃旧会话走全新 init；
-        // complete 调用的失败不在此吞，单独上浮以保留 Map 供重试。
-        let usable = false
+        // progress 一旦校验通过即视为可用会话，后续 complete 失败直接上浮保留 Map 供重试。
+        let progressOk = false
         try {
           phase.value = 'uploading'
           const p = await uploadApi.progress(oldId)
           if (!isResumeUsable(p, { fileHash, totalChunks, chunkSize })) {
             throw new Error('stale-session')
           }
+          // 校验通过即标记可用：此后任何失败（complete 直调/补传准备）都不删会话
+          progressOk = true
           if (p.complete) {
             // 全片已在盘：跳过传片直调 complete（闪断在 complete 前的收尾）；
-            // 此处 complete 失败直接上浮，不删 Map，保留“继续上传”重试。
+            // 此处 complete 失败直接上浮，不删 Map；保留 resumable 供“继续上传”重试。
             skippedChunks.value = totalChunks
-            resumable.value = null
+            resumable.value = {
+              fileName: f.name,
+              uploaded: totalChunks,
+              total: totalChunks,
+              skipped: totalChunks,
+            }
             phase.value = 'merging'
             progress.value = 95
             await uploadApi.complete(oldId, f.name, parentId.value)
             progress.value = 100
             await fetchList()
             pendingSessions.value.delete(key)
+            resumable.value = null
             lastFile = null
             return 'uploaded'
           }
@@ -256,7 +264,6 @@ export const useFileStore = defineStore('file', () => {
           const ratio = f.size > 0 ? baseBytes / f.size : 0
           progress.value = 10 + Math.round(85 * ratio)
           uploadId = oldId
-          usable = true
           if (missing.length > 0) {
             resumable.value = {
               fileName: f.name,
@@ -266,8 +273,8 @@ export const useFileStore = defineStore('file', () => {
             }
           }
         } catch (e) {
-          if (usable) {
-            // complete=true 分支内的 complete 失败：保留 Map 上浮
+          if (progressOk) {
+            // 可用会话内的 complete 失败：保留 Map + resumable 上浮
             throw e
           }
           // progress 查询失败或 stale：丢弃旧会话走全新 init

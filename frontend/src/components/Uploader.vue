@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useFileStore } from '@/store/file'
 import { CHUNK_SIZE, isSimpleSizeOk } from '@/components/upload'
@@ -68,8 +69,12 @@ async function onChange(e: Event): Promise<void> {
       return
     }
     ElMessage.success(store.skippedChunks > 0 ? `续传完成，已跳过 ${store.skippedChunks} 片` : '上传成功')
-  } catch {
-    // 失败由 request 统一弹窗；保留 pendingFile + store.resumable 供“继续上传”
+  } catch (e) {
+    // axios 失败由 request 拦截器统一弹窗；本地失败（哈希/校验）无请求，需此处补提示
+    if (!axios.isAxiosError(e)) {
+      ElMessage.error(e instanceof Error ? e.message : '上传失败')
+    }
+    // 失败保留 pendingFile + store.resumable 供“继续上传”
   } finally {
     input.value = ''
   }
@@ -88,8 +93,11 @@ async function onResume(): Promise<void> {
     }
     pendingFile = null
     ElMessage.success(store.skippedChunks > 0 ? `续传完成，已跳过 ${store.skippedChunks} 片` : '上传成功')
-  } catch {
-    // 仍失败则继续保留，可再次点击重试
+  } catch (e) {
+    // 仍失败则继续保留，可再次点击重试；本地失败同上补提示（axios 已由拦截器弹窗）
+    if (!axios.isAxiosError(e)) {
+      ElMessage.error(e instanceof Error ? e.message : '继续上传失败')
+    }
   }
 }
 </script>

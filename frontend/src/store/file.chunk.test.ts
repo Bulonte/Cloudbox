@@ -233,3 +233,172 @@ describe('S2 chunk store 秒传预检三分支', () => {
     expect(store.phase).toBe('idle')
   })
 })
+
+describe('S4 断点续传（progress 查进度只补 missing）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
+    mockedUpload.init.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+    })
+    mockedUpload.uploadChunk.mockResolvedValue({ uploadId: 'up-1', chunkIndex: 0, size: 1, status: 1 })
+    mockedUpload.complete.mockResolvedValue(item(21, 'big.txt'))
+    mockedFile.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(21, 'big.txt')] })
+    mockedUpload.progress.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+      uploaded: [],
+      missing: [0, 1, 2],
+      complete: false,
+    })
+  })
+
+  it('complete=true 时跳过传片直调 complete', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    // 首轮中断：index=1 失败，留下 up-1 会话
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net'))
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net')
+    expect(mockedUpload.init).toHaveBeenCalledTimes(1)
+    vi.clearAllMocks()
+    mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
+    mockedUpload.progress.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+      uploaded: [0, 1, 2],
+      missing: [],
+      complete: true,
+    })
+    mockedUpload.complete.mockResolvedValue(item(21, 'big.txt'))
+    mockedFile.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(21, 'big.txt')] })
+    const outcome = await store.resumeLast()
+    expect(outcome).toBe('uploaded')
+    expect(mockedUpload.progress).toHaveBeenCalledWith('up-1')
+    expect(mockedUpload.uploadChunk).not.toHaveBeenCalled()
+    expect(mockedUpload.complete).toHaveBeenCalledWith('up-1', 'big.txt', 0)
+    expect(store.skippedChunks).toBe(3)
+    expect(store.resumable).toBeNull()
+  })
+
+  it('missing=[1] 时只补传缺片', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net'))
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net')
+    vi.clearAllMocks()
+    mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
+    mockedUpload.progress.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+      uploaded: [0, 2],
+      missing: [1],
+      complete: false,
+    })
+    mockedUpload.uploadChunk.mockResolvedValue({ uploadId: 'up-1', chunkIndex: 1, size: 1, status: 1 })
+    mockedUpload.complete.mockResolvedValue(item(21, 'big.txt'))
+    mockedFile.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(21, 'big.txt')] })
+    const outcome = await store.resumeLast()
+    expect(outcome).toBe('uploaded')
+    const indexes = mockedUpload.uploadChunk.mock.calls.map((c) => c[1])
+    expect(indexes).toEqual([1])
+    expect(store.skippedChunks).toBe(2)
+  })
+
+  it('progress 404 时丢弃旧会话走全新 init', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net'))
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net')
+    expect(mockedUpload.init).toHaveBeenCalledTimes(1)
+    mockedHash.mockResolvedValue(HASH)
+    mockedFile.instantCheck.mockResolvedValue({ hit: false, existsGlobal: false, file: null })
+    mockedFile.list.mockResolvedValue({ total: 1, page: 1, pageSize: 20, items: [item(21, 'big.txt')] })
+    mockedUpload.progress.mockRejectedValueOnce(new Error('404'))
+    mockedUpload.init.mockResolvedValueOnce({
+      uploadId: 'up-2',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+    })
+    const outcome = await store.resumeLast()
+    expect(outcome).toBe('uploaded')
+    expect(mockedUpload.init).toHaveBeenCalledTimes(2)
+    // 全新会话传全量 3 片
+    expect(mockedUpload.uploadChunk.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('回显 hash 漂移时丢弃旧会话走全新 init', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net'))
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net')
+    mockedUpload.progress.mockResolvedValueOnce({
+      uploadId: 'up-1',
+      fileHash: 'b'.repeat(64),
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+      uploaded: [0],
+      missing: [1, 2],
+      complete: false,
+    })
+    mockedUpload.init.mockResolvedValueOnce({
+      uploadId: 'up-3',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+    })
+    const outcome = await store.resumeLast()
+    expect(outcome).toBe('uploaded')
+    expect(mockedUpload.init).toHaveBeenCalledTimes(2)
+    expect(mockedUpload.complete).toHaveBeenCalledWith('up-3', 'big.txt', 0)
+  })
+
+  it('补传失败保留 resumable，可再次 resumeLast 重试同一 uploadId', async () => {
+    const { useFileStore } = await import('@/store/file')
+    const store = useFileStore()
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net'))
+    await expect(store.uploadChunked(fakeFile('big.txt', 5 * 1024 * 1024))).rejects.toThrow('net')
+    expect(store.resumable).not.toBeNull()
+    // 第二轮 progress 命中 missing=[1,2]，但补传再次失败
+    mockedUpload.progress.mockResolvedValue({
+      uploadId: 'up-1',
+      fileHash: HASH,
+      totalChunks: 3,
+      chunkSize: CHUNK_SIZE,
+      status: 0,
+      uploaded: [0],
+      missing: [1, 2],
+      complete: false,
+    })
+    mockedUpload.uploadChunk.mockRejectedValueOnce(new Error('net2'))
+    await expect(store.resumeLast()).rejects.toThrow('net2')
+    expect(mockedUpload.complete).not.toHaveBeenCalled()
+    expect(store.uploading).toBe(false)
+    // 第三轮恢复成功，复用同一 uploadId
+    mockedUpload.uploadChunk.mockResolvedValue({ uploadId: 'up-1', chunkIndex: 1, size: 1, status: 1 })
+    const outcome = await store.resumeLast()
+    expect(outcome).toBe('uploaded')
+    expect(mockedUpload.progress).toHaveBeenCalledWith('up-1')
+    expect(mockedUpload.complete).toHaveBeenCalledWith('up-1', 'big.txt', 0)
+  })
+})

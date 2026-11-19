@@ -105,3 +105,62 @@ export function decideInstant(hit: boolean, existsGlobal: boolean): InstantDecis
   }
   return 'upload'
 }
+
+// S4 断点续传纯函数：会话键与回显合法性，零依赖可单测
+// fileKey 四元组 hash:size:n:cs，任一变化即视为新文件，防改名/改大小误命中旧会话
+
+/** 续传会话键：fileHash:size:totalChunks:chunkSize */
+export function sessionKey(
+  fileHash: string,
+  size: number,
+  totalChunks: number,
+  chunkSize: number,
+): string {
+  return `${fileHash}:${size}:${totalChunks}:${chunkSize}`
+}
+
+/** progress 回显子集（store 传入 UploadProgress 全量亦可，结构兼容即可） */
+export interface ResumeProgress {
+  fileHash: string
+  totalChunks: number
+  chunkSize: number
+  status: number
+}
+
+/** 本地切分参数（与 progress 回显逐项比对） */
+export interface ResumeLocal {
+  fileHash: string
+  totalChunks: number
+  chunkSize: number
+}
+
+/**
+ * 续传回显是否可用：status=2（已取消）直接丢弃；hash 大小写不敏感，
+ * totalChunks/chunkSize 必须完全一致，否则丢弃旧会话走全新 init。
+ */
+export function isResumeUsable(p: ResumeProgress, local: ResumeLocal): boolean {
+  if (p.status === 2) {
+    return false
+  }
+  return (
+    p.fileHash.toLowerCase() === local.fileHash.toLowerCase() &&
+    p.totalChunks === local.totalChunks &&
+    p.chunkSize === local.chunkSize
+  )
+}
+
+/**
+ * 已传字节和：按 uploaded 序号逐片累加，末片按实际剩余算，
+ * 避免按片数折算导致进度条跳变（与 store 字节口径一致）。
+ */
+export function uploadedBytesOf(uploaded: number[], fileSize: number, chunkSize: number): number {
+  let sum = 0
+  for (const i of uploaded) {
+    const remain = fileSize - i * chunkSize
+    if (remain <= 0) {
+      continue
+    }
+    sum += Math.min(chunkSize, remain)
+  }
+  return sum
+}

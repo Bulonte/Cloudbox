@@ -46,6 +46,8 @@ async function download(): Promise<void> {
     a.remove()
     URL.revokeObjectURL(url)
     ElMessage.success('下载已开始')
+  } catch {
+    // 失败由 request 拦截器统一弹窗（blob 错误体已解析），此处吞错防未处理 rejection
   } finally {
     downloading.value = false
   }

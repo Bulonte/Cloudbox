@@ -164,6 +164,7 @@ export const shareApi = {
     }
   },
   // S3 公开下载：blob 落盘，文件名由后端 Content-Disposition 决定时仍用 info 回退
+  // S3-fix：错误体也是 Blob，由 request 拦截器 readErrorMessage 解析后统一弹窗，此处不重复弹窗
   async download(code: string, password?: string): Promise<Blob> {
     const { data } = await request.get<Blob>(`/shares/${code}/download`, {
       params: password ? { password } : undefined,

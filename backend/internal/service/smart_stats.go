@@ -104,12 +104,13 @@ func mapMimeToType(mime, name string) string {
 	}
 	if strings.HasPrefix(m, "application/zip") || strings.HasPrefix(m, "application/x-rar") ||
 		strings.HasPrefix(m, "application/x-7z") || strings.HasPrefix(m, "application/gzip") ||
-		strings.HasPrefix(m, "application/x-tar") {
+		strings.HasPrefix(m, "application/x-gzip") || strings.HasPrefix(m, "application/x-tar") {
 		return "archive"
 	}
-	// 文本/文档兜底：pdf/doc/txt/md/csv/xls 均归 document（与分类器 extCategory 文档口径一致）
+	// 文本/文档兜底：pdf/doc/txt/md/csv/xls/ppt 均归 document（与分类器 extCategory 文档口径一致）
 	if strings.HasPrefix(m, "text/") || strings.Contains(m, "pdf") || strings.Contains(m, "msword") ||
-		strings.Contains(m, "officedocument") || strings.Contains(m, "sheet") || strings.Contains(m, "csv") {
+		strings.Contains(m, "officedocument") || strings.Contains(m, "sheet") || strings.Contains(m, "csv") ||
+		strings.Contains(m, "excel") || strings.Contains(m, "powerpoint") || strings.Contains(m, "presentation") {
 		return "document"
 	}
 	// mime 缺失时按扩展名兜底（与 smart.extCategory 思路一致，image 四类优先）

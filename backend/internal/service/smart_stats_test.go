@@ -146,3 +146,20 @@ func TestSmartStatsFull(t *testing.T) {
 		t.Fatalf("by_type 顺序不对: %+v", res.Storage.ByType)
 	}
 }
+
+// S5-fix：Office 文档 mime（xls/ppt 变体）与 x-gzip 归类回归
+func TestMapMimeToTypeOfficeArchive(t *testing.T) {
+	cases := map[string]string{
+		"application/vnd.ms-excel":                                                  "document",
+		"application/vnd.ms-powerpoint":                                             "document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         "document",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation": "document",
+		"application/x-gzip":                                                        "archive",
+		"application/pdf":                                                           "document",
+	}
+	for mime, want := range cases {
+		if got := mapMimeToType(mime, ""); got != want {
+			t.Fatalf("mime %q 应归 %q，实得 %q", mime, want, got)
+		}
+	}
+}

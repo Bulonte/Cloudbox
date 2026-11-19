@@ -104,6 +104,10 @@ func TestSmartStatsFull(t *testing.T) {
 	}
 	// 他人文件不计入
 	seedStatsFile(t, svc, 2, "other.txt", fmt.Sprintf("%064x", 44), "text/plain", "文档", 9999, day0)
+	// used 取 user 行配额口径：直插 file 行不走上传扣减，此处手动补记 4000（4 文件之和）
+	if ok, err := svc.users.IncrUsedBytesIfEnough(1, 4000); err != nil || !ok {
+		t.Fatalf("补记配额失败: ok=%v err=%v", ok, err)
+	}
 
 	res, err := svc.GetStats(1, 7)
 	if err != nil {

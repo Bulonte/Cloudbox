@@ -34,10 +34,13 @@ func newSmartRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	db.Create(&model.User{Username: "bob", Email: "bob@c.com", PasswordHash: "h", QuotaBytes: 100})
 	files := repository.NewFileRepository(db)
 	svc := service.NewSmartStatsService(files, repository.NewFingerprintRepository(db), repository.NewUserRepository(db))
-	// 预置 alice 一文件（今天），供聚合非空
+	// 预置 alice 一文件（今天），供聚合非空；used 取 user 行口径，此处手动补记 100
 	f := &model.File{FileName: "a.txt", FileHash: fmt.Sprintf("%064x", 7), FileSize: 100, FilePath: "p/a", MimeType: "text/plain", OwnerID: 1}
 	if err := files.CreateFile(f); err != nil {
 		t.Fatalf("预置失败: %v", err)
+	}
+	if err := db.Model(&model.User{}).Where("id = ?", 1).Update("used_bytes", 100).Error; err != nil {
+		t.Fatalf("补记配额失败: %v", err)
 	}
 	mgr, err := jwt.NewManager(fileTestSecret, "cloudbox", 2*time.Hour, 168*time.Hour)
 	if err != nil {

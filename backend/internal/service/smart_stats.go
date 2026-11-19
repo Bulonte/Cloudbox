@@ -159,7 +159,8 @@ func (s *SmartStatsService) GetStats(ownerID uint64, days int) (*SmartStatsResul
 	if err != nil {
 		return nil, err
 	}
-	used, count, err := s.files.SumSizeByOwner(ownerID)
+	// used 取 user 行配额口径（与上传卡配额同一数；软删不释放配额，SUM(file_size) 会偏小故不用）
+	_, count, err := s.files.SumSizeByOwner(ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +190,7 @@ func (s *SmartStatsService) GetStats(ownerID uint64, days int) (*SmartStatsResul
 	}
 	return &SmartStatsResult{
 		Storage: StorageBlock{
-			UsedBytes:  used,
+			UsedBytes:  u.UsedBytes,
 			QuotaBytes: u.QuotaBytes,
 			FileCount:  count,
 			ByType:     byType,

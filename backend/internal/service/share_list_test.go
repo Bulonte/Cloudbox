@@ -66,7 +66,8 @@ func TestListSharesFileGone(t *testing.T) {
 	svc, cleanup := newShareService(t)
 	defer cleanup()
 
-	if _, err := svc.CreateShare(CreateShareInput{OwnerID: 1, FileID: 1}); err != nil {
+	row, err := svc.CreateShare(CreateShareInput{OwnerID: 1, FileID: 1})
+	if err != nil {
 		t.Fatalf("预置失败: %v", err)
 	}
 	if err := svc.files.SoftDelete(1, 1); err != nil {
@@ -78,5 +79,12 @@ func TestListSharesFileGone(t *testing.T) {
 	}
 	if entries[0].FileName != "" {
 		t.Fatalf("删文件后名应空串: %q", entries[0].FileName)
+	}
+	// 文件已删时分享仍可取消，不应卡 ErrFileNotFound
+	if err := svc.CancelShare(1, row.ID); err != nil {
+		t.Fatalf("删文件后取消应成功: %v", err)
+	}
+	if _, total, _, _, _ := svc.ListShares(1, 1, 20); total != 0 {
+		t.Fatalf("取消后应 total=0, 得到 %d", total)
 	}
 }

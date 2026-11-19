@@ -31,7 +31,7 @@ onMounted(() => {
 })
 
 async function onDaysChange(): Promise<void> {
-  await fetchStats()
+  await fetchStats().catch(() => undefined)
 }
 
 const usedText = computed(() => formatBytes(stats.value?.storage.usedBytes ?? 0))

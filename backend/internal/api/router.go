@@ -57,8 +57,10 @@ func RegisterUploadRoutes(r *gin.Engine, h *handler.ChunkHandler, mgr *jwt.Manag
 
 // RegisterShareRoutes 注册分享路由组（W6-S1 创建需登录；S2 访问/下载公开链路另接）
 // S4：DELETE /:id 取消分享（需登录，仅 owner；成功后审计 share_cancel，C方案禁记 share_code）
+// S3(W8)：GET "" 分享管理列表（需登录，只回本人有效行，SQL 层 owner_id 过滤）
 func RegisterShareRoutes(r *gin.Engine, h *handler.ShareHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	shares := r.Group("/api/v1/shares", middleware.AuthRequired(mgr, checker))
+	shares.GET("", h.ListShares)
 	shares.POST("", h.CreateShare)
 	shares.DELETE("/:id", h.CancelShare)
 }

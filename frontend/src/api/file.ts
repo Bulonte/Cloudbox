@@ -49,7 +49,21 @@ interface RawFilePage {
   items: RawFile[] | null
 }
 
-function toFile(r: RawFile): FileItem {
+interface RawInstantCheck {
+  hit: boolean
+  exists_global?: boolean
+  file?: RawFile | null
+}
+
+/** 秒传预检结果：snake→camel 已转，exists_global 缺省兜 false，file null 判空 */
+export interface InstantCheckResult {
+  hit: boolean
+  existsGlobal: boolean
+  file: FileItem | null
+}
+
+/** 原始 DTO → 前端模型（供 api/upload.ts 复用 complete 的 FileResponse 转换） */
+export function toFile(r: RawFile): FileItem {
   return {
     id: r.id,
     fileName: r.file_name,
@@ -99,6 +113,19 @@ export const fileApi = {
   },
   async remove(id: number): Promise<void> {
     await request.delete<Biz<null>>(`/files/${String(id)}`)
+  },
+  // S2 秒传预检：只读不写盘不碰配额（<1s）；hit 本人已有秒传，exists_global 他人已存提示确认
+  async instantCheck(payload: { fileName: string; parentId: number; fileHash: string }): Promise<InstantCheckResult> {
+    const { data } = await request.post<Biz<RawInstantCheck>>('/files/instant-check', {
+      file_name: payload.fileName,
+      parent_id: payload.parentId,
+      file_hash: payload.fileHash,
+    })
+    return {
+      hit: data.data.hit,
+      existsGlobal: data.data.exists_global ?? false,
+      file: data.data.file ? toFile(data.data.file) : null,
+    }
   },
   // S5 简单上传：multipart file + parent_id 文本字段；axios 自动带 boundary，勿手写 Content-Type
   async upload(f: File, parentId: number, onProgress?: (pct: number) => void): Promise<FileItem> {

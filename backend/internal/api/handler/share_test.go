@@ -38,6 +38,7 @@ func newShareRouter(t *testing.T) (*gin.Engine, *jwt.Manager) {
 	sh := handler.NewShareHandler(service.NewShareService(repository.NewShareRepository(db), repository.NewFileRepository(db)))
 	r := gin.New()
 	shares := r.Group("/api/v1/shares", middleware.AuthRequired(mgr, &fakeRevoked{}))
+	shares.GET("", sh.ListShares)
 	shares.POST("", sh.CreateShare)
 	return r, mgr
 }
@@ -90,6 +91,60 @@ func TestCreateShareAPI(t *testing.T) {
 
 	// 无头 → 401/20001
 	w = doFile(r, http.MethodPost, "/api/v1/shares", `{"file_id":1}`, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("无头应 401, 得到 %d %s", w.Code, w.Body.String())
+	}
+	if code, _, _ := decodeBody(t, w); code != 20001 {
+		t.Fatalf("code=%d, 期望20001 %s", code, w.Body.String())
+	}
+}
+
+func TestListSharesAPI(t *testing.T) {
+	r, mgr := newShareRouter(t)
+	a := tok(t, mgr, 1)
+	b := tok(t, mgr, 2)
+
+	// 空列表：total=0 items=[] 非 null
+	w := doFile(r, http.MethodGet, "/api/v1/shares", "", a)
+	if w.Code != http.StatusOK {
+		t.Fatalf("列表应 200, 得到 %d %s", w.Code, w.Body.String())
+	}
+	code, total, page, size, items := decodeList(t, w)
+	if code != 0 || total != 0 || page != 1 || size != 20 || items == nil || len(items) != 0 {
+		t.Fatalf("空列表不对: code=%d total=%d page=%d size=%d body=%s", code, total, page, size, w.Body.String())
+	}
+
+	// 建两条再查：total=2，file_name 回填，禁透 password_hash
+	for i := 0; i < 2; i++ {
+		if w := doFile(r, http.MethodPost, "/api/v1/shares", `{"file_id":1}`, a); w.Code != http.StatusOK {
+			t.Fatalf("预置%d失败: %s", i, w.Body.String())
+		}
+	}
+	w = doFile(r, http.MethodGet, "/api/v1/shares?page=1&page_size=20", "", a)
+	code, total, _, _, items = decodeList(t, w)
+	if code != 0 || total != 2 || len(items) != 2 {
+		t.Fatalf("两条不对: code=%d total=%d len=%d body=%s", code, total, len(items), w.Body.String())
+	}
+	for _, it := range items {
+		if it["file_name"] != "a.txt" {
+			t.Fatalf("file_name 未回填: %v", it)
+		}
+		if _, has := it["password_hash"]; has {
+			t.Fatalf("回显泄漏 password_hash: %v", it)
+		}
+		if su, _ := it["share_url"].(string); len(su) < 4 || su[:3] != "/s/" {
+			t.Fatalf("share_url 前缀不对: %v", it)
+		}
+	}
+
+	// 他人隔离 total=0
+	w = doFile(r, http.MethodGet, "/api/v1/shares", "", b)
+	if _, total, _, _, _ := decodeList(t, w); total != 0 {
+		t.Fatalf("他人应隔离 total=0, body=%s", w.Body.String())
+	}
+
+	// 无头 401/20001
+	w = doFile(r, http.MethodGet, "/api/v1/shares", "", "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("无头应 401, 得到 %d %s", w.Code, w.Body.String())
 	}

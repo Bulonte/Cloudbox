@@ -11,7 +11,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { index: '/files', label: '文件' },
   { index: '/shares', label: '分享' },
-  { index: '/dashboard', label: '仪表盘（W8）', disabled: true },
+  { index: '/dashboard', label: '仪表盘' },
 ]
 
 /** 由 route.path 推导菜单高亮，空路径兜底到 /files */

@@ -402,9 +402,14 @@ func (s *ShareService) CancelShare(ownerID, shareID uint64, ips ...string) error
 	if err != nil {
 		return err
 	}
+	// 文件已软删时分享仍可取消：FindByIDAny 判已删为 404，此处吞掉只丢文件名快照，
+	// 不阻断 CancelShare，否则已删文件的分享行永远取消不掉
 	f, err := s.files.FindByIDAny(share.FileID)
 	if err != nil {
-		return ErrFileNotFound
+		if !errors.Is(err, ErrFileNotFound) {
+			return err
+		}
+		f = nil
 	}
 	if err := s.shares.CancelShare(shareID, ownerID); err != nil {
 		return err

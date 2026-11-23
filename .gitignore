@@ -46,6 +46,9 @@ frontend/coverage/
 frontend/.nuxt/
 frontend/*.local
 frontend/stats.html
+# S1 自动生成声明（unplugin-auto-import / unplugin-vue-components 构建产物，禁入库）
+frontend/auto-imports.d.ts
+frontend/components.d.ts
 
 # ---------- 日志与临时文件 ----------
 logs/

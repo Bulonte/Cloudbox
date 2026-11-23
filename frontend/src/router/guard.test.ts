@@ -3,15 +3,16 @@ import { setToken } from '@/api/request'
 import { NAV_ITEMS, resolveActive } from '@/components/nav'
 import { WHITE_LIST, resolveRedirect } from '@/router'
 
-describe('S3 主框架导航（nav.ts）', () => {
-  it('NAV_ITEMS 首项为文件页，仅仪表盘 disabled 占位', () => {
-    expect(NAV_ITEMS[0]?.index).toBe('/files')
-    expect(NAV_ITEMS.filter((i) => i.disabled).length).toBe(1)
+describe('S5 主框架导航（nav.ts）', () => {
+  it('NAV_ITEMS 三项全启用：文件/分享/仪表盘', () => {
+    expect(NAV_ITEMS.map((i) => i.index)).toEqual(['/files', '/shares', '/dashboard'])
+    expect(NAV_ITEMS.filter((i) => i.disabled).length).toBe(0)
   })
 
   it('resolveActive 由 path 推导高亮，空路径兜底 /files', () => {
     expect(resolveActive('/files/a')).toBe('/files')
     expect(resolveActive('/shares')).toBe('/shares')
+    expect(resolveActive('/dashboard')).toBe('/dashboard')
     expect(resolveActive('/')).toBe('/files')
   })
 })

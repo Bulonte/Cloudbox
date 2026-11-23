@@ -72,6 +72,12 @@ func RegisterSharePublicRoutes(r *gin.Engine, h *handler.ShareHandler) {
 	r.GET("/api/v1/shares/:code/download", h.DownloadShare)
 }
 
+// RegisterSmartRoutes 注册智能统计路由组（W8-S5：GET /stats 仪表盘聚合，需登录；归属 SQL 层过滤）
+func RegisterSmartRoutes(r *gin.Engine, h *handler.SmartHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
+	g := r.Group("/api/v1/smart", middleware.AuthRequired(mgr, checker))
+	g.GET("/stats", h.GetStats)
+}
+
 // RegisterFileRoutes 注册文件路由组（W4-S2 建夹/改名移动/软删 + S3 列表 + S6 单文件上传 + S7 流式下载 + S4 秒传预检，全挂 AuthRequired；细粒度归属由 Service 层判）
 func RegisterFileRoutes(r *gin.Engine, h *handler.FileHandler, mgr *jwt.Manager, checker middleware.RevokedChecker) {
 	files := r.Group("/api/v1/files", middleware.AuthRequired(mgr, checker))

@@ -9,7 +9,10 @@ import {
   checkChunkFile,
   decideInstant,
   isChunkSizeOk,
+  isResumeUsable,
   runPool,
+  sessionKey,
+  uploadedBytesOf,
 } from '@/components/upload'
 
 describe('S1 分片常量（与后端 service/chunk.go 对齐）', () => {
@@ -106,6 +109,21 @@ describe('S1 runPool（并发上限必须有界）', () => {
     ]
     await expect(runPool(tasks, 3)).rejects.toThrow('boom')
   })
+
+  it('失败后不再取新任务（首错定因，其余 worker 停取）', async () => {
+    const started: number[] = []
+    const tasks = Array.from({ length: 6 }, (_, i) => async (): Promise<void> => {
+      started.push(i)
+      if (i === 0) {
+        throw new Error('first-boom')
+      }
+      // 让 worker-0 先失败，其余在途任务收尾后不再取新任务
+      await new Promise((r) => setTimeout(r, 5))
+    })
+    await expect(runPool(tasks, 1)).rejects.toThrow('first-boom')
+    // limit=1 单 worker：失败即停，后续任务不再启动
+    expect(started).toEqual([0])
+  })
 })
 
 describe('S2 decideInstant（与后端 InstantResult 三分支对齐）', () => {
@@ -120,5 +138,67 @@ describe('S2 decideInstant（与后端 InstantResult 三分支对齐）', () => 
 
   it('全 miss 走正常上传', () => {
     expect(decideInstant(false, false)).toBe('upload')
+  })
+})
+
+describe('S4 续传纯函数（sessionKey/isResumeUsable/uploadedBytesOf）', () => {
+  const HASH = 'a'.repeat(64)
+
+  it('sessionKey 四元组任一变化即不同', () => {
+    const base = sessionKey(HASH, 5 * CHUNK_SIZE, 3, CHUNK_SIZE)
+    expect(sessionKey(HASH.toUpperCase(), 5 * CHUNK_SIZE, 3, CHUNK_SIZE)).not.toBe(base)
+    expect(sessionKey(HASH, 5 * CHUNK_SIZE + 1, 3, CHUNK_SIZE)).not.toBe(base)
+    expect(sessionKey(HASH, 5 * CHUNK_SIZE, 4, CHUNK_SIZE)).not.toBe(base)
+    expect(sessionKey(HASH, 5 * CHUNK_SIZE, 3, CHUNK_SIZE * 2)).not.toBe(base)
+  })
+
+  it('isResumeUsable：一致可用，hash 大小写不敏感', () => {
+    expect(
+      isResumeUsable(
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE, status: 0 },
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE },
+      ),
+    ).toBe(true)
+    expect(
+      isResumeUsable(
+        { fileHash: HASH.toUpperCase(), totalChunks: 3, chunkSize: CHUNK_SIZE, status: 1 },
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE },
+      ),
+    ).toBe(true)
+  })
+
+  it('isResumeUsable：status=2 或任一参数漂移即丢弃', () => {
+    expect(
+      isResumeUsable(
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE, status: 2 },
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE },
+      ),
+    ).toBe(false)
+    expect(
+      isResumeUsable(
+        { fileHash: `${'b'.repeat(64)}`, totalChunks: 3, chunkSize: CHUNK_SIZE, status: 0 },
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE },
+      ),
+    ).toBe(false)
+    expect(
+      isResumeUsable(
+        { fileHash: HASH, totalChunks: 4, chunkSize: CHUNK_SIZE, status: 0 },
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE },
+      ),
+    ).toBe(false)
+    expect(
+      isResumeUsable(
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE * 2, status: 0 },
+        { fileHash: HASH, totalChunks: 3, chunkSize: CHUNK_SIZE },
+      ),
+    ).toBe(false)
+  })
+
+  it('uploadedBytesOf：末片按实际剩余算', () => {
+    // 5MB 文件：2MB + 2MB + 1MB；uploaded=[0,2] → 3MB
+    expect(uploadedBytesOf([0, 2], 5 * 1024 * 1024, CHUNK_SIZE)).toBe(3 * 1024 * 1024)
+    expect(uploadedBytesOf([], 5 * 1024 * 1024, CHUNK_SIZE)).toBe(0)
+    // 越界序号忽略
+    expect(uploadedBytesOf([99], 5 * 1024 * 1024, CHUNK_SIZE)).toBe(0)
   })
 })

@@ -21,8 +21,9 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:8080',
-      // S3 公开分享：/s/:code 免登录直达后端，dev 联调同样代理
-      '/s': 'http://localhost:8080',
+      // S3 公开分享：仅代理 /s/<code> 后端接口；必须用 ^ 正则前缀，
+      // 否则 '/s' 会按 startsWith 吞掉 /src/* 模块请求导致 dev 白屏
+      '^/s/.+': 'http://localhost:8080',
     },
   },
 })
